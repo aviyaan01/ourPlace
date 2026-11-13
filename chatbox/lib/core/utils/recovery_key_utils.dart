@@ -48,14 +48,19 @@ class RecoveryKeyUtils {
     return HashUtils.hashPassword(normalized, salt);
   }
 
-  /// Verify candidate recovery phrase against stored hash and salt
+  /// Verify candidate recovery phrase against stored hash and salt using constant-time comparison
   static bool verifyRecoveryKey({
     required String candidatePhrase,
     required String storedHash,
     required String salt,
   }) {
     final candidateHash = hashRecoveryKey(candidatePhrase, salt);
-    return candidateHash == storedHash;
+    if (HashUtils.constantTimeEquals(candidateHash, storedHash)) {
+      return true;
+    }
+    // Backward compatibility fallback for legacy single-round SHA-256 verifiers
+    final legacyHash = HashUtils.legacyHashPassword(normalizeMnemonic(candidatePhrase), salt);
+    return HashUtils.constantTimeEquals(legacyHash, storedHash);
   }
 
   /// Fast lookup set for wordlist validation

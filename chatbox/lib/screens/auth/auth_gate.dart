@@ -29,8 +29,10 @@ class AuthGate extends StatefulWidget {
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   late final AuthRepository _authRepository;
   late final AppLockService _appLockService;
+  late final ChatRepository _chatRepository;
   StreamSubscription<bool>? _lockStateSub;
   bool? _isPasscodeConfigured;
+  String? _lastUserId;
 
   @override
   void initState() {
@@ -38,6 +40,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _authRepository = widget.authRepository ?? DefaultAuthRepository();
     _appLockService = widget.appLockService ?? DefaultAppLockService();
+    _chatRepository = widget.chatRepository ?? LocalChatRepository();
 
     _refreshPasscodeStatus();
 
@@ -59,7 +62,12 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
-      _appLockService.lockApp();
+      // Guard against infinite auto-lock loops when native OS biometric dialogs
+      // (Face ID / Fingerprint) transition the app lifecycle to paused or hidden.
+      if (_appLockService.isAppUnlocked &&
+          !_appLockService.isAuthenticatingBiometrics) {
+        _appLockService.lockApp();
+      }
     }
   }
 
@@ -87,6 +95,14 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         }
 
         final user = authSnapshot.data;
+        if (user?.id != _lastUserId) {
+          _lastUserId = user?.id;
+          if (user != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _refreshPasscodeStatus();
+            });
+          }
+        }
 
         /// 1. Unauthenticated -> Show login / account creation screen
         if (user == null) {
@@ -118,9 +134,11 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         /// 2B. Passcode configured but app is locked -> Show dedicated AppLockScreen
         if (!_appLockService.isAppUnlocked) {
           return AppLockScreen(
+            key: const ValueKey('app_lock_screen'),
             appLockService: _appLockService,
             onUnlocked: () => setState(() {}),
             onSignOutRequested: () async {
+              _chatRepository.stopRelayListener();
               _appLockService.lockApp();
               await _authRepository.signOut();
             },
@@ -131,7 +149,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         return HomeScreen(
           currentUser: user,
           authRepository: _authRepository,
-          chatRepository: widget.chatRepository,
+          chatRepository: _chatRepository,
           appLockService: _appLockService,
         );
       },

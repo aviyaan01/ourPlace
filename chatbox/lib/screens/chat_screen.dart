@@ -89,9 +89,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _initRealtimeSubscriptions() {
     // 1. Reactive messages stream from local SQLite
     _messageSubscription = _chatRepository
-        .watchMessages(widget.partnerId)
+        .watchMessages(widget.partnerId, currentUserId: _currentUserId)
         .listen((updatedList) {
-      if (mounted && updatedList.isNotEmpty) {
+      if (mounted) {
         setState(() {
           _messages = updatedList;
         });
@@ -189,6 +189,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _messageSubscription?.cancel();
     _luvBurstSubscription?.cancel();
     _recordingTimer?.cancel();
+    _chatRepository.realtimeService.sendTyping(
+      currentUserId: _currentUserId,
+      partnerId: widget.partnerId,
+      isTyping: false,
+    );
+    _chatRepository.realtimeService.updatePresence(
+      currentUserId: _currentUserId,
+      partnerId: widget.partnerId,
+      isOnline: false,
+    );
     _chatRepository.realtimeService.pause();
     _messageController.dispose();
     _scrollController.dispose();
@@ -198,8 +208,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Load persisted messages via ChatRepository
   Future<void> _loadMessagesFromRepository() async {
     try {
-      final storedMessages =
-          await _chatRepository.getMessages(widget.partnerId);
+      final storedMessages = await _chatRepository.getMessages(
+        widget.partnerId,
+        currentUserId: _currentUserId,
+      );
 
       if (storedMessages.isEmpty) {
         if (widget.partnerId == AppConstants.defaultPartnerId) {
@@ -336,25 +348,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _messageController.clear();
 
     // Auto-scroll to bottom
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        0.0,
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-      );
-    }
-
-    // Save and dispatch through ChatRepository
-    if (att != null && attBytes != null) {
-      await _chatRepository.sendMediaMessage(newMessage, attBytes);
-    } else {
-      await _chatRepository.sendMessage(newMessage);
-    }
-
-    _messageController.clear();
-
-    // Auto-scroll to bottom
-    if (_scrollController.hasClients) {
+    if (_scrollController.hasClients && _scrollController.offset > 0) {
       _scrollController.animateTo(
         0.0,
         duration: const Duration(milliseconds: 250),
@@ -369,20 +363,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       isTyping: false,
     );
 
-    // Simulate transition to 'sent'
-    Future.delayed(const Duration(milliseconds: 600), () async {
-      if (!mounted) return;
-      final index = _messages.indexWhere((m) => m.id == newMessage.id);
-      if (index != -1) {
-        setState(() {
-          _messages[index] = _messages[index].copyWithStatus(MessageStatus.sent);
-        });
-        await _chatRepository.updateMessageStatus(
-          newMessage.id,
-          MessageStatus.sent,
-        );
+    // Save and dispatch through ChatRepository
+    try {
+      if (att != null && attBytes != null) {
+        await _chatRepository.sendMediaMessage(newMessage, attBytes);
+      } else {
+        await _chatRepository.sendMessage(newMessage);
       }
-    });
+    } catch (_) {
+      // Repository automatically updates local message status to failed
+    }
   }
 
   void _onInputChanged(String text) {
@@ -504,7 +494,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _messages.insert(0, newMsg);
     });
 
-    if (_scrollController.hasClients) {
+    if (_scrollController.hasClients && _scrollController.offset > 0) {
       _scrollController.animateTo(
         0.0,
         duration: const Duration(milliseconds: 250),
@@ -512,7 +502,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
 
-    await _chatRepository.sendMediaMessage(newMsg, sampleAudio);
+    try {
+      await _chatRepository.sendMediaMessage(newMsg, sampleAudio);
+    } catch (_) {}
   }
 
   void _openMediaViewer(ChatMessage message) {
@@ -558,6 +550,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _handleMessageReaction(ChatMessage message) async {
     final emoji = await MessageReactionPicker.show(context);
+    if (!mounted) return;
     if (emoji != null) {
       await _chatRepository.coupleFeaturesService.toggleReaction(
         messageId: message.id,
@@ -565,7 +558,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         currentUsername: _currentUsername,
         emoji: emoji,
       );
-      final updated = await _chatRepository.getMessages(widget.partnerId);
+      if (!mounted) return;
+      final updated = await _chatRepository.getMessages(
+        widget.partnerId,
+        currentUserId: _currentUserId,
+      );
       if (mounted) {
         setState(() {
           _messages = updated;

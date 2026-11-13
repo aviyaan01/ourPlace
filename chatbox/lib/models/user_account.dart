@@ -49,10 +49,16 @@ class UserAccount {
     );
   }
 
-  /// Verify candidate password against the salted password hash
+  /// Verify candidate password against the salted password hash using constant-time comparison
   bool verifyPassword(String candidatePassword) {
+    // 1. Check against PBKDF2-HMAC-SHA256 derived hash
     final candidateHash = HashUtils.hashPassword(candidatePassword, salt);
-    return candidateHash == passwordHash;
+    if (HashUtils.constantTimeEquals(candidateHash, passwordHash)) {
+      return true;
+    }
+    // 2. Backward compatibility fallback for legacy single-round SHA-256 verifiers
+    final legacyHash = HashUtils.legacyHashPassword(candidatePassword, salt);
+    return HashUtils.constantTimeEquals(legacyHash, passwordHash);
   }
 
   /// Verify candidate recovery phrase against stored recovery key hash
@@ -116,7 +122,7 @@ class UserAccount {
       username: json['username'] as String,
       passwordHash: json['passwordHash'] as String,
       salt: json['salt'] as String,
-      createdAt: DateTime.parse(json['createdAt'] as String),
+      createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ?? DateTime.now(),
       publicIdentityKey: json['publicIdentityKey'] as String?,
       recoveryKeyHash: json['recoveryKeyHash'] as String?,
       recoveryKeySalt: json['recoveryKeySalt'] as String?,

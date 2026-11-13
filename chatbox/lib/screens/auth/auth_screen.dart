@@ -544,7 +544,12 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
           },
         );
       },
-    );
+    ).whenComplete(() {
+      resetUsernameController.dispose();
+      recoveryPhraseController.dispose();
+      newPasswordController.dispose();
+      confirmPasswordController.dispose();
+    });
   }
 
 

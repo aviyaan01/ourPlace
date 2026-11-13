@@ -38,6 +38,6 @@ class SecurityLog {
         eventType: json['eventType'] as String,
         details: json['details'] as String,
         severity: json['severity'] as String? ?? 'info',
-        timestamp: DateTime.parse(json['timestamp'] as String),
+        timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
       );
 }

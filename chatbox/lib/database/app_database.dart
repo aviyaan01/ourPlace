@@ -6,6 +6,10 @@ import '../core/constants/app_constants.dart';
 part 'app_database.g.dart';
 
 /// Table schema for storing chat messages locally
+@TableIndex(
+  name: 'messages_sender_recipient_timestamp',
+  columns: {#senderId, #recipientId, #timestamp},
+)
 class Messages extends Table {
   TextColumn get id => text()();
   TextColumn get senderId => text()();
@@ -92,7 +96,7 @@ class AppDatabase extends _$AppDatabase {
       : super(e ?? driftDatabase(name: AppConstants.databaseName));
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -117,6 +121,9 @@ class AppDatabase extends _$AppDatabase {
           if (from < 6) {
             await m.addColumn(messages, messages.reactions);
             await m.createTable(loveNotes);
+          }
+          if (from < 7) {
+            await m.createIndex(messagesSenderRecipientTimestamp);
           }
         },
       );

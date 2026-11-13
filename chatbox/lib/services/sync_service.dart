@@ -271,6 +271,12 @@ class DefaultSyncService implements SyncService {
           } catch (_) {}
         }
         await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
+      } else if (envelope.isTypingSignal) {
+        // Ephemeral typing indicator: volatile signal handled by RealtimeService; purge from cloud
+        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
+      } else if (envelope.isPresenceSignal) {
+        // Ephemeral presence heartbeat: volatile signal handled by RealtimeService; purge from cloud
+        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
       } else if (envelope.isDeliveryReceipt) {
         // Handle delivery receipt
         await _database.updateMessageStatusIfProgressing(

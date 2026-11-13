@@ -73,7 +73,7 @@ class SharedConversationBundle {
       senderUsername: json['senderUsername'] as String,
       conversationPartner: json['conversationPartner'] as String,
       messages: parsedMessages,
-      sharedAt: DateTime.parse(json['sharedAt'] as String),
+      sharedAt: DateTime.tryParse(json['sharedAt'] as String? ?? '') ?? DateTime.now(),
       totalCount: json['totalCount'] as int? ?? parsedMessages.length,
     );
   }

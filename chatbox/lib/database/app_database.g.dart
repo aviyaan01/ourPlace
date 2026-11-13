@@ -2698,6 +2698,10 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     this,
   );
   late final $LoveNotesTable loveNotes = $LoveNotesTable(this);
+  late final Index messagesSenderRecipientTimestamp = Index(
+    'messages_sender_recipient_timestamp',
+    'CREATE INDEX messages_sender_recipient_timestamp ON messages (sender_id, recipient_id, timestamp)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2708,6 +2712,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     securityLogs,
     loveConnections,
     loveNotes,
+    messagesSenderRecipientTimestamp,
   ];
 }
 

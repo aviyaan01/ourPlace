@@ -497,8 +497,9 @@ class EphemeralRelayEnvelope {
       recipientId: json['recipient_id'] as String,
       ciphertextPayload: json['ciphertext'] as String,
       envelopeType: json['type'] as String? ?? 'message',
-      timestamp: DateTime.parse(json['timestamp'] as String),
-      expiresAt: DateTime.parse(json['expires_at'] as String),
+      timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
+      expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? '') ??
+          DateTime.now().add(const Duration(hours: 48)),
     );
   }
 

@@ -136,7 +136,7 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
   }
 
   String _sanitizeKey(String username) {
-    return HashUtils.normalizeUsername(username).replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+    return HashUtils.normalizeUsername(username).replaceAll(RegExp(r'[^a-zA-Z0-9_@]'), '_');
   }
 
   DatabaseReference _dirRef(String username) {

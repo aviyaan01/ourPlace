@@ -27,21 +27,28 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final effectiveChatRepo = chatRepository ?? LocalChatRepository();
+    final effectiveAuthRepo = authRepository ?? DefaultAuthRepository();
+    final effectiveLockService = appLockService ?? DefaultAppLockService();
+
     return InboxScreen(
       currentUser: currentUser,
-      authRepository: authRepository,
-      chatRepository: chatRepository,
+      authRepository: effectiveAuthRepo,
+      chatRepository: effectiveChatRepo,
       conversationRepository: conversationRepository,
       onOpenProfile: () {
         Navigator.of(context).push(
           MaterialPageRoute(
             builder: (context) => ProfileScreen(
               currentUser: currentUser,
-              authRepository: authRepository,
-              appLockService: appLockService,
-              realtimeService: chatRepository?.realtimeService,
-              notificationService: chatRepository?.notificationService,
-              loveConnectionService: chatRepository?.loveConnectionService,
+              authRepository: effectiveAuthRepo,
+              appLockService: effectiveLockService,
+              realtimeService: effectiveChatRepo.realtimeService,
+              notificationService: effectiveChatRepo.notificationService,
+              loveConnectionService: effectiveChatRepo.loveConnectionService,
+              conversationSharingService:
+                  effectiveChatRepo.conversationSharingService,
+              chatRepository: effectiveChatRepo,
             ),
             settings: const RouteSettings(name: '/profile'),
           ),

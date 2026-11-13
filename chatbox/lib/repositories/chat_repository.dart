@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/errors/app_exception.dart';
 import 'package:chatbox/database/local_database.dart';
 import 'package:chatbox/models/encrypted_payload.dart';
@@ -22,22 +23,23 @@ import 'package:chatbox/services/user_directory_service.dart';
 
 /// Abstract contract for chat messaging operations
 abstract class ChatRepository {
-  Future<List<ChatMessage>> getMessages(String partnerId);
+  Future<List<ChatMessage>> getMessages(String partnerId, {String? currentUserId});
   Future<List<ChatMessage>> getMessagesPaginated(
     String partnerId, {
+    String? currentUserId,
     required int offset,
     required int limit,
   });
-  Stream<List<ChatMessage>> watchMessages(String partnerId);
+  Stream<List<ChatMessage>> watchMessages(String partnerId, {String? currentUserId});
   Future<void> sendMessage(ChatMessage message);
   Future<ChatMessage> processIncomingMessage(ChatMessage rawMessage);
   Future<List<ChatMessage>> syncPendingRelayMessages(String currentUserId);
   Stream<ChatMessage> listenToIncomingRelayMessages(String currentUserId);
   Future<bool> updateMessageStatus(String messageId, MessageStatus status);
   Future<bool> deleteMessage(String messageId);
-  Future<List<ChatMessage>> searchMessages(String partnerId, String query);
-  Future<void> clearConversation(String partnerId);
-  Future<int> getMessageCount(String partnerId);
+  Future<List<ChatMessage>> searchMessages(String partnerId, String query, {String? currentUserId});
+  Future<void> clearConversation(String partnerId, {String? currentUserId});
+  Future<int> getMessageCount(String partnerId, {String? currentUserId});
   Future<void> seedInitialMessages(List<ChatMessage> initialMessages);
 
   // Phase 12 Message Synchronization additions
@@ -86,6 +88,7 @@ class LocalChatRepository implements ChatRepository {
   final LoveConnectionService _loveConnectionService;
   final ConversationSharingService _conversationSharingService;
   final CoupleFeaturesService _coupleFeaturesService;
+  String? _activeUserId;
 
   LocalChatRepository({
     LocalDatabase? database,
@@ -181,12 +184,19 @@ class LocalChatRepository implements ChatRepository {
 
   @override
   void startRelayListener(String currentUserId) {
+    _activeUserId = currentUserId;
     _syncService.startRelayListener(currentUserId: currentUserId);
   }
 
   @override
   void stopRelayListener() {
     _syncService.stopRelayListener();
+  }
+
+  String _resolveCurrentUserId(String? candidate) {
+    if (candidate != null && candidate.isNotEmpty) return candidate;
+    if (_activeUserId != null && _activeUserId!.isNotEmpty) return _activeUserId!;
+    return AppConstants.currentUserId;
   }
 
   /// Resolves the X25519 public identity key for a target recipient.
@@ -231,30 +241,36 @@ class LocalChatRepository implements ChatRepository {
   }
 
   @override
-  Future<List<ChatMessage>> getMessages(String partnerId) {
-    return _database.getMessagesForPartner(partnerId);
+  Future<List<ChatMessage>> getMessages(String partnerId, {String? currentUserId}) {
+    final uid = _resolveCurrentUserId(currentUserId);
+    return _database.getMessagesForPartner(partnerId, currentUserId: uid);
   }
 
   @override
   Future<List<ChatMessage>> getMessagesPaginated(
     String partnerId, {
+    String? currentUserId,
     required int offset,
     required int limit,
   }) {
+    final uid = _resolveCurrentUserId(currentUserId);
     return _database.getMessagesForPartnerPaginated(
       partnerId,
+      currentUserId: uid,
       offset: offset,
       limit: limit,
     );
   }
 
   @override
-  Stream<List<ChatMessage>> watchMessages(String partnerId) {
-    return _database.watchMessagesForPartner(partnerId);
+  Stream<List<ChatMessage>> watchMessages(String partnerId, {String? currentUserId}) {
+    final uid = _resolveCurrentUserId(currentUserId);
+    return _database.watchMessagesForPartner(partnerId, currentUserId: uid);
   }
 
   @override
   Future<void> sendMessage(ChatMessage message) async {
+    _activeUserId ??= message.senderId;
     // 1. Immediately persist locally in cleartext with initial 'sending' state
     final initial = message.copyWithStatus(MessageStatus.sending);
     await _database.saveMessage(initial);
@@ -426,6 +442,11 @@ class LocalChatRepository implements ChatRepository {
             continue;
           }
 
+          if (envelope.isTypingSignal || envelope.isPresenceSignal) {
+            await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
+            continue;
+          }
+
           final raw = ChatMessage(
             id: envelope.id,
             senderId: envelope.senderId,
@@ -482,18 +503,21 @@ class LocalChatRepository implements ChatRepository {
   }
 
   @override
-  Future<List<ChatMessage>> searchMessages(String partnerId, String query) {
-    return _database.searchMessages(partnerId: partnerId, query: query);
+  Future<List<ChatMessage>> searchMessages(String partnerId, String query, {String? currentUserId}) {
+    final uid = _resolveCurrentUserId(currentUserId);
+    return _database.searchMessages(partnerId: partnerId, query: query, currentUserId: uid);
   }
 
   @override
-  Future<void> clearConversation(String partnerId) {
-    return _database.clearMessagesForPartner(partnerId);
+  Future<void> clearConversation(String partnerId, {String? currentUserId}) {
+    final uid = _resolveCurrentUserId(currentUserId);
+    return _database.clearMessagesForPartner(partnerId, currentUserId: uid);
   }
 
   @override
-  Future<int> getMessageCount(String partnerId) {
-    return _database.getMessageCountForPartner(partnerId);
+  Future<int> getMessageCount(String partnerId, {String? currentUserId}) {
+    final uid = _resolveCurrentUserId(currentUserId);
+    return _database.getMessageCountForPartner(partnerId, currentUserId: uid);
   }
 
   @override

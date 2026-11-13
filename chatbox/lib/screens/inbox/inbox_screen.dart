@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/theme/app_theme.dart';
 import 'package:chatbox/models/conversation.dart';
 import 'package:chatbox/models/user.dart';
@@ -33,6 +34,8 @@ class InboxScreen extends StatefulWidget {
 
 class _InboxScreenState extends State<InboxScreen> {
   late final ConversationRepository _conversationRepo;
+  late final ChatRepository _chatRepository;
+  late final AuthRepository _authRepository;
   final TextEditingController _searchController = TextEditingController();
   StreamSubscription<List<Conversation>>? _conversationsSub;
   StreamSubscription<dynamic>? _notificationSub;
@@ -42,20 +45,27 @@ class _InboxScreenState extends State<InboxScreen> {
   bool _isLoading = true;
   String _searchQuery = '';
 
+  String get _activeUserId =>
+      widget.currentUser?.username ??
+      widget.currentUser?.id ??
+      AppConstants.currentUserId;
+
   @override
   void initState() {
     super.initState();
     _conversationRepo =
         widget.conversationRepository ?? LocalConversationRepository();
+    _chatRepository = widget.chatRepository ?? LocalChatRepository();
+    _authRepository = widget.authRepository ?? DefaultAuthRepository();
     _searchController.addListener(_onSearchChanged);
     _loadConversations();
-    final activeUser = widget.currentUser?.username ?? widget.currentUser?.id;
-    if (activeUser != null && activeUser.isNotEmpty) {
-      widget.chatRepository?.startRelayListener(activeUser);
-      widget.chatRepository?.syncService.reconcile(currentUserId: activeUser);
+    final activeUser = _activeUserId;
+    if (activeUser.isNotEmpty) {
+      _chatRepository.startRelayListener(activeUser);
+      _chatRepository.syncService.reconcile(currentUserId: activeUser);
     }
     _conversationsSub = _conversationRepo
-        .watchConversations(currentUserId: widget.currentUser?.id)
+        .watchConversations(currentUserId: _activeUserId)
         .listen((conversations) {
       if (mounted) {
         setState(() {
@@ -65,7 +75,7 @@ class _InboxScreenState extends State<InboxScreen> {
         });
       }
     });
-    _notificationSub = widget.chatRepository?.notificationService.onNotificationDisplayed
+    _notificationSub = _chatRepository.notificationService.onNotificationDisplayed
         .listen((_) => _loadConversations());
   }
 
@@ -102,7 +112,7 @@ class _InboxScreenState extends State<InboxScreen> {
 
   Future<void> _loadConversations() async {
     final conversations = await _conversationRepo.getConversations(
-      currentUserId: widget.currentUser?.id,
+      currentUserId: _activeUserId,
     );
     if (mounted) {
       setState(() {
@@ -124,8 +134,8 @@ class _InboxScreenState extends State<InboxScreen> {
           partnerName: conversation.partner.displayName,
           partnerId: partnerId,
           currentUser: widget.currentUser,
-          repository: widget.chatRepository,
-          authRepository: widget.authRepository,
+          repository: _chatRepository,
+          authRepository: _authRepository,
           isLoveConnection: conversation.isLoveConnection,
         ),
         settings: const RouteSettings(name: '/chat'),
@@ -228,7 +238,7 @@ class _InboxScreenState extends State<InboxScreen> {
           ],
         );
       },
-    );
+    ).whenComplete(() => usernameController.dispose());
   }
 
   @override
@@ -274,7 +284,7 @@ class _InboxScreenState extends State<InboxScreen> {
                                   ..._filteredConversations.map(
                                     (conv) => ConversationTile(
                                       conversation: conv,
-                                      currentUserId: widget.currentUser?.id ?? 'current_user',
+                                      currentUserId: _activeUserId,
                                       onTap: () => _openConversation(conv),
                                     ),
                                   ),
@@ -290,7 +300,7 @@ class _InboxScreenState extends State<InboxScreen> {
                                     ...loveConversations.map(
                                       (conv) => ConversationTile(
                                         conversation: conv,
-                                        currentUserId: widget.currentUser?.id ?? 'current_user',
+                                        currentUserId: _activeUserId,
                                         onTap: () => _openConversation(conv),
                                       ),
                                     )
@@ -306,7 +316,7 @@ class _InboxScreenState extends State<InboxScreen> {
                                     ...otherConversations.map(
                                       (conv) => ConversationTile(
                                         conversation: conv,
-                                        currentUserId: widget.currentUser?.id ?? 'current_user',
+                                        currentUserId: _activeUserId,
                                         onTap: () => _openConversation(conv),
                                       ),
                                     ),

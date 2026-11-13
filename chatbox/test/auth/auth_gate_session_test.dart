@@ -73,5 +73,33 @@ void main() {
       expect(await secureStorage.read('active_session_username'), isNull);
       expect(await authService.getCurrentUser(), isNull);
     });
+
+    test('DefaultAppLockService persists lockout and prevents restart bypass', () async {
+      final lockService = DefaultAppLockService(storage: secureStorage);
+      await lockService.setPasscode('1234');
+
+      // 4 incorrect attempts
+      for (int i = 0; i < 4; i++) {
+        final result = await lockService.verifyPasscode('9999');
+        expect(result, isFalse);
+      }
+      expect(lockService.failedAttempts, equals(4));
+      expect(lockService.isLockedOut(), isFalse);
+
+      // 5th incorrect attempt triggers 60s lockout
+      final fifth = await lockService.verifyPasscode('9999');
+      expect(fifth, isFalse);
+      expect(lockService.failedAttempts, equals(5));
+      expect(lockService.isLockedOut(), isTrue);
+      expect(lockService.remainingLockoutSeconds(), greaterThan(50));
+
+      // Simulate app force-close by re-creating DefaultAppLockService with same secureStorage
+      final restartedLockService = DefaultAppLockService(storage: secureStorage);
+      await restartedLockService.isPasscodeConfigured();
+
+      expect(restartedLockService.isLockedOut(), isTrue);
+      expect(restartedLockService.remainingLockoutSeconds(), greaterThan(50));
+      expect(restartedLockService.failedAttempts, equals(5));
+    });
   });
 }

@@ -31,7 +31,7 @@ class FirebaseRelayService implements RelayService {
   }
 
   String _sanitizeKey(String id) {
-    return HashUtils.normalizeUsername(id).replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+    return HashUtils.normalizeUsername(id).replaceAll(RegExp(r'[^a-zA-Z0-9_@]'), '_');
   }
 
   DatabaseReference _recipientRef(String recipientId) {

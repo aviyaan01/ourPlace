@@ -2,19 +2,20 @@
   "rules": {
     "relays": {
       "$recipientId": {
-        ".read": true,
+        ".read": "auth != null && (auth.uid == $recipientId || root.child('directory').child($recipientId).child('accountId').val() == auth.uid)",
         "$messageId": {
-          ".write": true,
-          ".validate": "newData.hasChildren(['id', 'sender_id', 'recipient_id', 'ciphertext', 'timestamp', 'expires_at'])"
+          ".write": "auth != null && ((!newData.exists() && (auth.uid == $recipientId || root.child('directory').child($recipientId).child('accountId').val() == auth.uid)) || (newData.exists() && (newData.child('sender_id').val() == auth.uid || root.child('directory').child(newData.child('sender_id').val()).child('accountId').val() == auth.uid)))",
+          ".validate": "newData.hasChildren(['id', 'sender_id', 'recipient_id', 'ciphertext', 'timestamp', 'expires_at']) && (newData.child('recipient_id').val() == $recipientId || root.child('directory').child(newData.child('recipient_id').val()).child('accountId').val() == $recipientId || newData.child('recipient_id').val() == root.child('directory').child($recipientId).child('username').val())"
         }
       }
     },
     "directory": {
-      ".read": true,
+      ".read": "auth != null",
       "$username": {
-        ".write": true,
-        ".validate": "newData.hasChildren(['accountId', 'username', 'publicIdentityKey', 'lastSeen'])"
+        ".write": "auth != null && (!data.exists() || data.child('accountId').val() == auth.uid) && (!newData.exists() || newData.child('accountId').val() == auth.uid)",
+        ".validate": "newData.hasChildren(['accountId', 'username', 'publicIdentityKey', 'lastSeen']) && newData.child('username').val() == $username && newData.child('accountId').val() == auth.uid"
       }
     }
   }
 }
+

@@ -79,6 +79,12 @@ class DefaultRealtimeService implements RealtimeService {
   final Map<String, StreamController<bool>> _typingControllers = {};
   final Map<String, StreamController<UserPresence>> _presenceControllers = {};
 
+  /// Subscriptions to chatService.watchPendingRelayEnvelopes for typing and presence
+  final Map<String, StreamSubscription<List<EphemeralRelayEnvelope>>>
+      _typingSubscriptions = {};
+  final Map<String, StreamSubscription<List<EphemeralRelayEnvelope>>>
+      _presenceSubscriptions = {};
+
   /// Local caching of partner state
   final Map<String, bool> _cachedPartnerTyping = {};
   final Map<String, UserPresence> _cachedPartnerPresence = {};
@@ -99,19 +105,35 @@ class DefaultRealtimeService implements RealtimeService {
   StreamController<bool> _getTypingController(
       String currentUserId, String partnerId) {
     final key = _partnerKey(currentUserId, partnerId);
-    return _typingControllers.putIfAbsent(
-      key,
-      () => StreamController<bool>.broadcast(),
+    final existing = _typingControllers[key];
+    if (existing != null && !existing.isClosed) {
+      return existing;
+    }
+    final controller = StreamController<bool>.broadcast(
+      onCancel: () {
+        _typingSubscriptions[key]?.cancel();
+        _typingSubscriptions.remove(key);
+      },
     );
+    _typingControllers[key] = controller;
+    return controller;
   }
 
   StreamController<UserPresence> _getPresenceController(
       String currentUserId, String partnerId) {
     final key = _partnerKey(currentUserId, partnerId);
-    return _presenceControllers.putIfAbsent(
-      key,
-      () => StreamController<UserPresence>.broadcast(),
+    final existing = _presenceControllers[key];
+    if (existing != null && !existing.isClosed) {
+      return existing;
+    }
+    final controller = StreamController<UserPresence>.broadcast(
+      onCancel: () {
+        _presenceSubscriptions[key]?.cancel();
+        _presenceSubscriptions.remove(key);
+      },
     );
+    _presenceControllers[key] = controller;
+    return controller;
   }
 
   @override
@@ -119,10 +141,16 @@ class DefaultRealtimeService implements RealtimeService {
     required String currentUserId,
     required String partnerId,
   }) {
+    final key = _partnerKey(currentUserId, partnerId);
     final controller = _getTypingController(currentUserId, partnerId);
 
+    // Cancel existing subscription for this partner key if any
+    _typingSubscriptions[key]?.cancel();
+
     // Wire ephemeral relay listener
-    _chatService.watchPendingRelayEnvelopes(currentUserId).listen((envelopes) {
+    _typingSubscriptions[key] = _chatService
+        .watchPendingRelayEnvelopes(currentUserId)
+        .listen((envelopes) {
       for (final env in envelopes) {
         if (env.isTypingSignal && env.senderId == partnerId) {
           final isTyping = env.isTypingActive;
@@ -200,14 +228,21 @@ class DefaultRealtimeService implements RealtimeService {
     required String currentUserId,
     required String partnerId,
   }) {
+    final key = _partnerKey(currentUserId, partnerId);
     final controller = _getPresenceController(currentUserId, partnerId);
 
+    // Cancel existing subscription for this partner key if any
+    _presenceSubscriptions[key]?.cancel();
+
     // Wire ephemeral relay listener
-    _chatService.watchPendingRelayEnvelopes(currentUserId).listen((envelopes) {
+    _presenceSubscriptions[key] = _chatService
+        .watchPendingRelayEnvelopes(currentUserId)
+        .listen((envelopes) {
       for (final env in envelopes) {
         if (env.isPresenceSignal && env.senderId == partnerId) {
           try {
-            final data = jsonDecode(env.ciphertextPayload) as Map<String, dynamic>;
+            final data =
+                jsonDecode(env.ciphertextPayload) as Map<String, dynamic>;
             final isOnline = data['isOnline'] as bool? ?? false;
             final lastSeen = data['lastSeen'] != null
                 ? DateTime.tryParse(data['lastSeen'] as String)
@@ -365,6 +400,15 @@ class DefaultRealtimeService implements RealtimeService {
   void dispose() {
     _inactivityTimer?.cancel();
     _stopHeartbeat();
+    for (final sub in _typingSubscriptions.values) {
+      sub.cancel();
+    }
+    for (final sub in _presenceSubscriptions.values) {
+      sub.cancel();
+    }
+    _typingSubscriptions.clear();
+    _presenceSubscriptions.clear();
+
     for (final c in _typingControllers.values) {
       c.close();
     }

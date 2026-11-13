@@ -418,7 +418,28 @@ class DefaultConversationSharingService implements ConversationSharingService {
     required SharedConversationBundle bundle,
     required String currentUserId,
   }) async {
-    return await _localDatabase.importSharedMessages(bundle.messages);
+    // Sanitize and normalize imported messages before database insertion
+    final sanitizedMessages = bundle.messages.map((m) {
+      String sender = m.senderId;
+      String recipient = m.recipientId;
+
+      // Ensure sender ID is not the generic 'current_user' of the exporter
+      if (sender == 'current_user' || sender.isEmpty) {
+        sender = bundle.senderUsername;
+      }
+
+      // Ensure recipient ID is not generic 'current_user'
+      if (recipient == 'current_user' || recipient.isEmpty) {
+        recipient = bundle.senderUsername;
+      }
+
+      return m.copyWith(
+        senderId: sender,
+        recipientId: recipient,
+      );
+    }).toList();
+
+    return await _localDatabase.importSharedMessages(sanitizedMessages);
   }
 
   @override

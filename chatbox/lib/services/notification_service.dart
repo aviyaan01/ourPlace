@@ -3,11 +3,88 @@ import 'package:chatbox/core/config/app_environment.dart';
 import 'package:chatbox/models/notification_settings.dart';
 import 'package:firebase_messaging/firebase_messaging.dart' hide NotificationSettings;
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // Silent data-only push wake-up signal: the background message triggers
-  // local reconciliation when the user returns or via background sync.
+  // local reconciliation when the user returns and an OS-level notification tray alert.
+  try {
+    final localNotifications = FlutterLocalNotificationsPlugin();
+
+    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const darwinSettings = DarwinInitializationSettings();
+    const initSettings = InitializationSettings(
+      android: androidSettings,
+      iOS: darwinSettings,
+      macOS: darwinSettings,
+    );
+
+    await localNotifications.initialize(settings: initSettings);
+
+    String title = 'Nest';
+    String body = 'New private message received';
+
+    if (message.notification != null) {
+      title = message.notification!.title ?? title;
+      body = message.notification!.body ?? body;
+    } else if (message.data.isNotEmpty) {
+      if (message.data['type'] == 'wakeup') {
+        final sender = message.data['senderId'] as String?;
+        title = 'Nest';
+        body = (sender != null && sender.isNotEmpty)
+            ? 'New message from $sender'
+            : 'New private message received';
+      } else if (message.data['title'] != null) {
+        title = message.data['title'] as String;
+        body = message.data['body'] as String? ?? body;
+      }
+    }
+
+    final payload = message.data['conversationId'] as String? ??
+        message.data['senderId'] as String?;
+
+    const androidDetails = AndroidNotificationDetails(
+      'nest_messages',
+      'Private Messages',
+      channelDescription: 'End-to-end encrypted private message notifications',
+      importance: Importance.high,
+      priority: Priority.high,
+      icon: '@mipmap/ic_launcher',
+    );
+
+    const darwinDetails = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const details = NotificationDetails(
+      android: androidDetails,
+      iOS: darwinDetails,
+      macOS: darwinDetails,
+    );
+
+    final notificationId = message.messageId != null
+        ? message.messageId.hashCode
+        : DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    await localNotifications.show(
+      id: notificationId,
+      title: title,
+      body: body,
+      notificationDetails: details,
+      payload: payload,
+    );
+  } catch (e) {
+    debugPrint('Background notification tray alert error: $e');
+  }
+}
+
+/// Public alias for [_firebaseMessagingBackgroundHandler] to support direct testing
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await _firebaseMessagingBackgroundHandler(message);
 }
 
 /// Abstract contract for privacy-first push notifications and wake-up signals (Phase 14)
@@ -66,6 +143,8 @@ class DefaultNotificationService implements NotificationService {
   NotificationSettings _settings = const NotificationSettings();
   String? _deviceToken = 'mock_fcm_token_nest';
   String? _pendingRoute;
+  final FlutterLocalNotificationsPlugin _localNotifications =
+      FlutterLocalNotificationsPlugin();
   final StreamController<String> _tappedController =
       StreamController<String>.broadcast();
   final StreamController<Map<String, dynamic>> _displayedController =
@@ -83,6 +162,30 @@ class DefaultNotificationService implements NotificationService {
 
   @override
   Future<void> initialize() async {
+    if (AppEnvironment.isProduction) {
+      try {
+        const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+        const darwinSettings = DarwinInitializationSettings();
+        const initSettings = InitializationSettings(
+          android: androidSettings,
+          iOS: darwinSettings,
+          macOS: darwinSettings,
+        );
+
+        await _localNotifications.initialize(
+          settings: initSettings,
+          onDidReceiveNotificationResponse: (NotificationResponse response) {
+            final payload = response.payload;
+            if (payload != null && payload.isNotEmpty) {
+              simulateNotificationTap(payload);
+            }
+          },
+        );
+      } catch (e) {
+        debugPrint('DefaultNotificationService: local notifications init error: $e');
+      }
+    }
+
     if (AppEnvironment.isProduction) {
       try {
         final messaging = FirebaseMessaging.instance;
@@ -162,6 +265,40 @@ class DefaultNotificationService implements NotificationService {
     displayedAlerts.add(alertData);
     if (!_displayedController.isClosed) {
       _displayedController.add(alertData);
+    }
+
+    if (AppEnvironment.isProduction) {
+      try {
+        const androidDetails = AndroidNotificationDetails(
+          'nest_messages',
+          'Private Messages',
+          channelDescription: 'End-to-end encrypted private message notifications',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+        );
+        const darwinDetails = DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        );
+        const details = NotificationDetails(
+          android: androidDetails,
+          iOS: darwinDetails,
+          macOS: darwinDetails,
+        );
+
+        final notifId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        await _localNotifications.show(
+          id: notifId,
+          title: displayTitle,
+          body: displayBody,
+          notificationDetails: details,
+          payload: conversationId,
+        );
+      } catch (e) {
+        debugPrint('DefaultNotificationService: local notification show error: $e');
+      }
     }
   }
 

@@ -10,6 +10,7 @@ import 'package:chatbox/services/access_throttling_service.dart';
 import 'package:chatbox/services/encryption_service.dart';
 import 'package:chatbox/services/secure_storage_service.dart';
 import 'package:chatbox/services/user_directory_service.dart';
+import 'package:firebase_auth/firebase_auth.dart' hide User;
 import 'package:flutter/foundation.dart';
 
 /// Abstract service contract for anonymous identity authentication (Phase 6 & 9)
@@ -46,6 +47,7 @@ class LocalAuthService implements AuthService {
     AccessThrottlingService? throttlingService,
     EncryptionService? encryptionService,
     SecureStorageService? secureStorage,
+    UserDirectoryService? directoryService,
     bool resetSession = false,
   }) {
     if (database != null) {
@@ -59,6 +61,9 @@ class LocalAuthService implements AuthService {
     }
     if (secureStorage != null) {
       _instance._secureStorage = secureStorage;
+    }
+    if (directoryService != null) {
+      _instance._directoryService = directoryService;
     }
     if (resetSession) {
       _instance.resetDefaultSession();
@@ -83,6 +88,9 @@ class LocalAuthService implements AuthService {
   AccessThrottlingService _throttlingService = AccessThrottlingService();
   EncryptionService _encryptionService = StandardE2EEEncryptionService();
   SecureStorageService _secureStorage = DefaultSecureStorageService();
+  UserDirectoryService? _directoryService;
+  UserDirectoryService get _directory =>
+      _directoryService ?? DefaultUserDirectoryService();
 
   String? _lastRegisteredRecoveryKey;
 
@@ -119,8 +127,24 @@ class LocalAuthService implements AuthService {
   Future<bool> isUsernameAvailable(String username) async {
     final validationError = HashUtils.validateUsername(username);
     if (validationError != null) return false;
-    final taken = await _db.isUsernameTaken(username);
-    return !taken;
+    final normalized = HashUtils.normalizeUsername(username);
+
+    // 1. Check local SQLite storage
+    final localTaken = await _db.isUsernameTaken(normalized);
+    if (localTaken) return false;
+
+    // 2. Check remote directory (FirebaseUserDirectoryService) to prevent collisions and account takeovers
+    try {
+      final remoteProfile = await _directory.lookupProfile(normalized);
+      if (remoteProfile != null) {
+        return false;
+      }
+    } catch (e) {
+      debugPrint(
+          'LocalAuthService: isUsernameAvailable remote directory check notice: $e');
+    }
+
+    return true;
   }
 
   @override
@@ -148,18 +172,25 @@ class LocalAuthService implements AuthService {
 
     final normalized = HashUtils.normalizeUsername(username);
 
-    // 3. Check username uniqueness
-    final isTaken = await _db.isUsernameTaken(normalized);
-    if (isTaken) {
+    // 3. Check username uniqueness locally and remotely
+    final isAvailable = await isUsernameAvailable(normalized);
+    if (!isAvailable) {
       throw AuthException(
         'Username $normalized is already taken',
         code: 'USERNAME_TAKEN',
       );
     }
 
-    // 4. Generate random account ID
+    // 4. Generate account ID (reusing Firebase Auth UID if authenticated)
     final randomSuffix = Random.secure().nextInt(90000) + 10000;
-    final accountId = 'acc_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix';
+    String accountId =
+        'acc_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix';
+    try {
+      final firebaseUid = FirebaseAuth.instance.currentUser?.uid;
+      if (firebaseUid != null && firebaseUid.isNotEmpty) {
+        accountId = firebaseUid;
+      }
+    } catch (_) {}
 
     // 5. Generate and hash 12-word recovery key
     final phrase = recoveryKey ?? RecoveryKeyUtils.generateMnemonic();
@@ -191,7 +222,7 @@ class LocalAuthService implements AuthService {
 
     // 7b. Publish public identity key to remote directory (Trial & Discovery Bridge)
     try {
-      await DefaultUserDirectoryService().publishProfile(
+      await _directory.publishProfile(
         DirectoryProfile(
           accountId: accountId,
           username: normalized,
@@ -271,7 +302,7 @@ class LocalAuthService implements AuthService {
     // 4c. Update remote directory presence & ensure public key is published
     try {
       final pubKey = await _encryptionService.getPublicIdentityKey();
-      await DefaultUserDirectoryService().publishProfile(
+      await _directory.publishProfile(
         DirectoryProfile(
           accountId: account.accountId,
           username: normalized,

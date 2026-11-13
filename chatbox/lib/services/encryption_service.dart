@@ -142,10 +142,18 @@ class StandardE2EEEncryptionService implements EncryptionService {
       sharedSecret: sharedSecret,
     );
 
-    // 4. Encrypt with AES-256-GCM (generating random 12-byte nonce & 16-byte MAC)
+    // 4. Encrypt with AES-256-GCM ensuring a fresh random 96-bit (12-byte) nonce
+    final nonce = CryptoKeyUtils.generateNonce(12);
     final secretBox = await CryptoKeyUtils.encryptAesGcm(
       plaintext: plaintext,
       secretKey: messageKey,
+      nonce: nonce,
+    );
+
+    // Securely prepend the 96-bit nonce to the ciphertext payload
+    final prependedCiphertext = CryptoKeyUtils.prependNonce(
+      nonce: secretBox.nonce,
+      ciphertext: secretBox.cipherText,
     );
 
     // 5. Wrap in structured EncryptedPayload envelope
@@ -153,7 +161,7 @@ class StandardE2EEEncryptionService implements EncryptionService {
       version: 1,
       senderPublicKey: localPublicBase64,
       nonce: base64Encode(secretBox.nonce),
-      ciphertext: base64Encode(secretBox.cipherText),
+      ciphertext: base64Encode(prependedCiphertext),
       mac: base64Encode(secretBox.mac.bytes),
       createdAt: DateTime.now(),
     );
@@ -212,12 +220,29 @@ class StandardE2EEEncryptionService implements EncryptionService {
 
     // 5. Authenticate & Decrypt with AES-256-GCM
     final nonceBytes = base64Decode(payload.nonce);
-    final ciphertextBytes = base64Decode(payload.ciphertext);
+    final rawCiphertextBytes = base64Decode(payload.ciphertext);
     final macBytes = base64Decode(payload.mac);
 
+    List<int> effectiveNonce = nonceBytes;
+    List<int> effectiveCiphertext = rawCiphertextBytes;
+
+    // Detect prepended 96-bit nonce in ciphertext
+    if (rawCiphertextBytes.length >= 12) {
+      final split = CryptoKeyUtils.splitPrependedNonce(rawCiphertextBytes);
+      if (nonceBytes.isNotEmpty) {
+        if (CryptoKeyUtils.bytesEqual(split.nonce, nonceBytes)) {
+          effectiveNonce = split.nonce;
+          effectiveCiphertext = split.ciphertext;
+        }
+      } else {
+        effectiveNonce = split.nonce;
+        effectiveCiphertext = split.ciphertext;
+      }
+    }
+
     return await CryptoKeyUtils.decryptAesGcm(
-      ciphertext: ciphertextBytes,
-      nonce: nonceBytes,
+      ciphertext: effectiveCiphertext,
+      nonce: effectiveNonce,
       mac: macBytes,
       secretKey: messageKey,
     );

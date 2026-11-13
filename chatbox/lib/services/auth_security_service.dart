@@ -92,7 +92,7 @@ class AuthSecurityService {
       clientNonce: clientNonce,
       username: username,
     );
-    return clientProof == expectedProof;
+    return HashUtils.constantTimeEquals(clientProof, expectedProof);
   }
 
   /// Compute mutual server proof to prove server identity back to client

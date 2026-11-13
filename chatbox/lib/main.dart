@@ -26,7 +26,19 @@ void main() async {
   }
   final notificationService = DefaultNotificationService();
   await notificationService.initialize();
-  runApp(MyApp(notificationService: notificationService));
+
+  final authRepository = DefaultAuthRepository();
+  final chatRepository = LocalChatRepository(
+    notificationService: notificationService,
+  );
+  final appLockService = DefaultAppLockService();
+
+  runApp(MyApp(
+    authRepository: authRepository,
+    chatRepository: chatRepository,
+    appLockService: appLockService,
+    notificationService: notificationService,
+  ));
 }
 
 class MyApp extends StatelessWidget {

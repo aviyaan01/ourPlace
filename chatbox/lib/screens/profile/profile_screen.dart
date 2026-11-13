@@ -48,7 +48,6 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   late final LoveConnectionService _loveConnectionService;
   late final ConversationSharingService _conversationSharingService;
-  bool _hideLoveConnection = false;
   bool _biometricsEnabled = false;
   bool _biometricsAvailable = false;
   late final RealtimeService _realtimeService;
@@ -774,256 +773,190 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 20),
 
               /// Privacy & Real-Time Presence Card (Phase 13)
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF242424),
-                  borderRadius: BorderRadius.circular(24),
-                ),
-                padding: const EdgeInsets.all(18.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.visibility, color: Colors.white, size: 20),
-                        SizedBox(width: 8),
-                        Text(
-                          'Privacy & Presence (Phase 13)',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
+              Material(
+                color: const Color(0xFF242424),
+                borderRadius: BorderRadius.circular(24),
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.all(18.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.visibility, color: Colors.white, size: 20),
+                          SizedBox(width: 8),
+                          Text(
+                            'Privacy & Presence (Phase 13)',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Zero Telemetry • You control what your partner sees',
+                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      ),
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Share Online Status & Last Seen',
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      'Zero Telemetry • You control what your partner sees',
-                      style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Share Online Status & Last Seen',
-                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                        subtitle: const Text(
+                          'When disabled, you appear permanently offline to your partner.',
+                          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        value: _presenceSharingEnabled,
+                        activeThumbColor: const Color(0xFF00E676),
+                        onChanged: (val) async {
+                          setState(() {
+                            _presenceSharingEnabled = val;
+                          });
+                          await _realtimeService.setPresenceSharingEnabled(val);
+                        },
                       ),
-                      subtitle: const Text(
-                        'When disabled, you appear permanently offline to your partner.',
-                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      const Divider(color: Color(0xFF333333), height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Share Typing Indicator',
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: const Text(
+                          'When disabled, partner will not see "typing..." when you write.',
+                          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        value: _typingSharingEnabled,
+                        activeThumbColor: const Color(0xFFFF80AB),
+                        onChanged: (val) async {
+                          setState(() {
+                            _typingSharingEnabled = val;
+                          });
+                          await _realtimeService.setTypingSharingEnabled(val);
+                        },
                       ),
-                      value: _presenceSharingEnabled,
-                      activeThumbColor: const Color(0xFF00E676),
-                      onChanged: (val) async {
-                        setState(() {
-                          _presenceSharingEnabled = val;
-                        });
-                        await _realtimeService.setPresenceSharingEnabled(val);
-                      },
-                    ),
-                    const Divider(color: Color(0xFF333333), height: 16),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Share Typing Indicator',
-                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
-                      ),
-                      subtitle: const Text(
-                        'When disabled, partner will not see "typing..." when you write.',
-                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                      ),
-                      value: _typingSharingEnabled,
-                      activeThumbColor: const Color(0xFFFF80AB),
-                      onChanged: (val) async {
-                        setState(() {
-                          _typingSharingEnabled = val;
-                        });
-                        await _realtimeService.setTypingSharingEnabled(val);
-                      },
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
 
               /// Notifications & Privacy Card (Phase 14)
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF242424),
-                  borderRadius: BorderRadius.circular(24),
-                ),
-                padding: const EdgeInsets.all(18.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.notifications_active_outlined, color: Colors.white, size: 20),
-                        SizedBox(width: 8),
-                        Text(
-                          'Notifications & Privacy (Phase 14)',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
+              Material(
+                color: const Color(0xFF242424),
+                borderRadius: BorderRadius.circular(24),
+                clipBehavior: Clip.antiAlias,
+                child: Padding(
+                  padding: const EdgeInsets.all(18.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.notifications_active_outlined, color: Colors.white, size: 20),
+                          SizedBox(width: 8),
+                          Text(
+                            'Notifications & Privacy (Phase 14)',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Zero Plaintext • Silent wake-up pings & lock screen privacy',
+                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                      ),
+                      const SizedBox(height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Push Notifications',
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: const Text(
+                          'Allow silent wake-up signals when the app is in background.',
+                          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        value: _notificationsEnabled,
+                        activeThumbColor: const Color(0xFF00E676),
+                        onChanged: (val) async {
+                          setState(() {
+                            _notificationsEnabled = val;
+                          });
+                          await _updateNotificationSettings();
+                        },
+                      ),
+                      const Divider(color: Color(0xFF333333), height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Discreet Mode',
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: const Text(
+                          'Hide sender & message preview on lock screen. Displays "New private message".',
+                          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        value: _discreetModeEnabled,
+                        activeThumbColor: const Color(0xFFFFB300),
+                        onChanged: (val) async {
+                          setState(() {
+                            _discreetModeEnabled = val;
+                          });
+                          await _updateNotificationSettings();
+                        },
+                      ),
+                      const Divider(color: Color(0xFF333333), height: 16),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Sound & Haptics',
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        subtitle: const Text(
+                          'Play discrete alert sound and subtle vibration on new messages.',
+                          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                        ),
+                        value: _soundEnabled,
+                        activeThumbColor: Colors.white70,
+                        onChanged: (val) async {
+                          setState(() {
+                            _soundEnabled = val;
+                          });
+                          await _updateNotificationSettings();
+                        },
+                      ),
+                      const Divider(color: Color(0xFF333333), height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 42,
+                        child: OutlinedButton.icon(
+                          onPressed: _handleTestNotification,
+                          icon: const Icon(Icons.notifications_none_rounded, color: Colors.white70, size: 16),
+                          label: const Text(
+                            'Test Private Notification',
+                            style: TextStyle(color: Colors.white, fontSize: 13.5),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            side: const BorderSide(color: Color(0xFF444444)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
                           ),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      'Zero Plaintext • Silent wake-up pings & lock screen privacy',
-                      style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                    ),
-                    const SizedBox(height: 16),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Push Notifications',
-                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
                       ),
-                      subtitle: const Text(
-                        'Allow silent wake-up signals when the app is in background.',
-                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                      ),
-                      value: _notificationsEnabled,
-                      activeThumbColor: const Color(0xFF00E676),
-                      onChanged: (val) async {
-                        setState(() {
-                          _notificationsEnabled = val;
-                        });
-                        await _updateNotificationSettings();
-                      },
-                    ),
-                    const Divider(color: Color(0xFF333333), height: 16),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Discreet Mode',
-                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
-                      ),
-                      subtitle: const Text(
-                        'Hide sender & message preview on lock screen. Displays "New private message".',
-                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                      ),
-                      value: _discreetModeEnabled,
-                      activeThumbColor: const Color(0xFFFFB300),
-                      onChanged: (val) async {
-                        setState(() {
-                          _discreetModeEnabled = val;
-                        });
-                        await _updateNotificationSettings();
-                      },
-                    ),
-                    const Divider(color: Color(0xFF333333), height: 16),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text(
-                        'Sound & Haptics',
-                        style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
-                      ),
-                      subtitle: const Text(
-                        'Play discrete alert sound and subtle vibration on new messages.',
-                        style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                      ),
-                      value: _soundEnabled,
-                      activeThumbColor: Colors.white70,
-                      onChanged: (val) async {
-                        setState(() {
-                          _soundEnabled = val;
-                        });
-                        await _updateNotificationSettings();
-                      },
-                    ),
-                    const Divider(color: Color(0xFF333333), height: 20),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 42,
-                      child: OutlinedButton.icon(
-                        onPressed: _handleTestNotification,
-                        icon: const Icon(Icons.notifications_none_rounded, color: Colors.white70, size: 16),
-                        label: const Text(
-                          'Test Private Notification',
-                          style: TextStyle(color: Colors.white, fontSize: 13.5),
-                        ),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xFF444444)),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              /// Love Connection Card
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2E2428),
-                  borderRadius: BorderRadius.circular(24),
-                  border: Border.all(
-                    color: const Color(0xFFFF6B81).withValues(alpha: 0.35),
+                    ],
                   ),
-                ),
-                padding: const EdgeInsets.all(18.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.favorite, color: Color(0xFFFF6B81), size: 20),
-                        SizedBox(width: 8),
-                        Text(
-                          'Love Connection',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'Connected with @twilight',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      '0 or 1 active couple connection. Does not automatically grant access to other chats.',
-                      style: TextStyle(
-                        color: Colors.white54,
-                        fontSize: 12,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'Hide from visible profile',
-                          style: TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        Switch(
-                          value: _hideLoveConnection,
-                          activeThumbColor: const Color(0xFFFF6B81),
-                          onChanged: (val) {
-                            setState(() {
-                              _hideLoveConnection = val;
-                            });
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
                 ),
               ),
               const SizedBox(height: 20),
@@ -1509,7 +1442,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
         ],
       ),
-    );
+    ).whenComplete(() => controller.dispose());
   }
 
   void _confirmUnlinkLoveConnection(String currentUserId, String currentUsername) {

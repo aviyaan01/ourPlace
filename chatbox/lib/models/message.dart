@@ -1,3 +1,4 @@
+import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/models/media_attachment.dart';
 
 /// Message type enumeration
@@ -51,8 +52,13 @@ class ChatMessage {
   bool get isSent => senderId == 'current_user';
 
   /// Check if message was sent by a specific user ID
-  bool isSentBy(String currentUserId) =>
-      senderId == currentUserId || (senderId == 'current_user' && currentUserId.isNotEmpty);
+  bool isSentBy(String currentUserId) {
+    if (currentUserId.isEmpty) return false;
+    if (senderId == 'current_user') return true;
+    if (senderId == currentUserId) return true;
+    return HashUtils.normalizeUsername(senderId) ==
+        HashUtils.normalizeUsername(currentUserId);
+  }
 
   /// Get sender display name (for UI compatibility)
   String getSenderName([String partnerName = '@twilight', String currentUserName = 'You']) {
@@ -84,7 +90,7 @@ class ChatMessage {
       senderId: json['senderId'] as String,
       recipientId: json['recipientId'] as String,
       text: json['text'] as String,
-      timestamp: DateTime.parse(json['timestamp'] as String),
+      timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
       type: MessageType.values.firstWhere(
         (e) => e.toString().split('.').last == json['type'],
         orElse: () => MessageType.text,

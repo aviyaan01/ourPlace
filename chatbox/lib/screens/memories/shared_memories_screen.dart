@@ -7,11 +7,13 @@ import 'package:chatbox/screens/media/private_media_viewer_screen.dart';
 class SharedMemoriesScreen extends StatefulWidget {
   final String partnerUsername;
   final ChatRepository chatRepository;
+  final String? currentUsername;
 
   const SharedMemoriesScreen({
     super.key,
     required this.partnerUsername,
     required this.chatRepository,
+    this.currentUsername,
   });
 
   @override
@@ -34,8 +36,10 @@ class _SharedMemoriesScreenState extends State<SharedMemoriesScreen> {
   Future<void> _loadMemories() async {
     setState(() => _isLoading = true);
     try {
-      final messages = await widget.chatRepository
-          .getMessages(widget.partnerUsername);
+      final messages = await widget.chatRepository.getMessages(
+        widget.partnerUsername,
+        currentUserId: widget.currentUsername,
+      );
       final media = messages.where((m) => m.mediaAttachment != null).toList();
       if (mounted) {
         setState(() {

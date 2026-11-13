@@ -35,8 +35,10 @@ class _CoupleMilestonesScreenState extends State<CoupleMilestonesScreen> {
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
     try {
-      final messages = await widget.chatRepository
-          .getMessages(widget.loveConnection.partnerUsername);
+      final messages = await widget.chatRepository.getMessages(
+        widget.loveConnection.partnerUsername,
+        currentUserId: widget.currentUsername,
+      );
       final ms = widget.chatRepository.coupleFeaturesService.calculateMilestones(
         connectedAt: widget.loveConnection.connectedAt,
         messages: messages,

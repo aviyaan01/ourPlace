@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:chatbox/core/errors/app_exception.dart';
 import 'package:cryptography/cryptography.dart';
 
@@ -98,13 +99,54 @@ class CryptoKeyUtils {
     }
   }
 
-  /// Generate a cryptographically secure 12-byte initialization vector (nonce)
-  static List<int> generateNonce([int length = 12]) {
+  /// Generate a cryptographically secure 96-bit (12-byte) initialization vector (nonce)
+  static Uint8List generateNonce([int length = 12]) {
     final random = Random.secure();
-    return List<int>.generate(length, (_) => random.nextInt(256));
+    final values = Uint8List(length);
+    for (int i = 0; i < length; i++) {
+      values[i] = random.nextInt(256);
+    }
+    return values;
   }
 
-  /// Encrypt plaintext with AES-256-GCM
+  /// Securely prepend a 96-bit (12-byte) nonce to a ciphertext payload
+  static Uint8List prependNonce({
+    required List<int> nonce,
+    required List<int> ciphertext,
+  }) {
+    if (nonce.length != 12) {
+      throw ArgumentError(
+        'AES-GCM nonce must be exactly 96 bits (12 bytes), got ${nonce.length} bytes',
+      );
+    }
+    final result = Uint8List(nonce.length + ciphertext.length);
+    result.setRange(0, nonce.length, nonce);
+    result.setRange(nonce.length, result.length, ciphertext);
+    return result;
+  }
+
+  /// Split a combined payload [12 bytes nonce] + [ciphertext] into nonce and ciphertext
+  static ({Uint8List nonce, Uint8List ciphertext}) splitPrependedNonce(
+      List<int> payload) {
+    if (payload.length < 12) {
+      throw ArgumentError('Payload too short to contain a 96-bit nonce');
+    }
+    final nonce = Uint8List.fromList(payload.sublist(0, 12));
+    final ciphertext = Uint8List.fromList(payload.sublist(12));
+    return (nonce: nonce, ciphertext: ciphertext);
+  }
+
+  /// Constant-time byte array equality check to prevent timing side-channels
+  static bool bytesEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    int result = 0;
+    for (int i = 0; i < a.length; i++) {
+      result |= a[i] ^ b[i];
+    }
+    return result == 0;
+  }
+
+  /// Encrypt plaintext with AES-256-GCM ensuring a fresh random 96-bit (12-byte) nonce
   ///
   /// Returns a [SecretBox] containing cipherText bytes, nonce bytes, and MAC tag.
   static Future<SecretBox> encryptAesGcm({
@@ -114,7 +156,10 @@ class CryptoKeyUtils {
   }) async {
     try {
       final plaintextBytes = utf8.encode(plaintext);
-      final iv = nonce ?? generateNonce(12);
+      // Guarantee a fresh, cryptographically secure 96-bit (12-byte) random nonce
+      final iv = (nonce != null && nonce.length == 12)
+          ? (nonce is Uint8List ? nonce : Uint8List.fromList(nonce))
+          : generateNonce(12);
 
       final secretBox = await _aesGcm.encrypt(
         plaintextBytes,
@@ -175,7 +220,9 @@ class CryptoKeyUtils {
     List<int>? nonce,
   }) async {
     try {
-      final iv = nonce ?? generateNonce(12);
+      final iv = (nonce != null && nonce.length == 12)
+          ? (nonce is Uint8List ? nonce : Uint8List.fromList(nonce))
+          : generateNonce(12);
       final secretBox = await _aesGcm.encrypt(
         bytes,
         secretKey: secretKey,

@@ -5339,6 +5339,9 @@ class MockAppLockService implements AppLockService {
   bool get isAppUnlocked => _isAppUnlocked;
 
   @override
+  bool get isAuthenticatingBiometrics => false;
+
+  @override
   Stream<bool> get lockStateChanges => _controller.stream;
 
   @override
