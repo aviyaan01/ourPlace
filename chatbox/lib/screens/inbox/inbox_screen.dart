@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:chatbox/main.dart';
 import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/theme/app_theme.dart';
 import 'package:chatbox/models/conversation.dart';
@@ -33,9 +34,9 @@ class InboxScreen extends StatefulWidget {
 }
 
 class _InboxScreenState extends State<InboxScreen> {
-  late final ConversationRepository _conversationRepo;
-  late final ChatRepository _chatRepository;
-  late final AuthRepository _authRepository;
+  late ConversationRepository _conversationRepo;
+  late ChatRepository _chatRepository;
+  late AuthRepository _authRepository;
   final TextEditingController _searchController = TextEditingController();
   StreamSubscription<List<Conversation>>? _conversationsSub;
   StreamSubscription<dynamic>? _notificationSub;
@@ -46,26 +47,28 @@ class _InboxScreenState extends State<InboxScreen> {
   Timer? _searchDebounceTimer;
   bool _isLoading = true;
   String _searchQuery = '';
+  User? _resolvedCurrentUser;
 
   String get _activeUserId =>
       widget.currentUser?.username ??
       widget.currentUser?.id ??
+      _resolvedCurrentUser?.username ??
+      _resolvedCurrentUser?.id ??
+      _chatRepository.database.activeUsername ??
       AppConstants.currentUserId;
 
   @override
   void initState() {
     super.initState();
+    _resolvedCurrentUser = widget.currentUser;
     _conversationRepo =
         widget.conversationRepository ?? LocalConversationRepository();
     _chatRepository = widget.chatRepository ?? LocalChatRepository();
     _authRepository = widget.authRepository ?? DefaultAuthRepository();
     _searchController.addListener(_onSearchChanged);
     _loadConversations();
-    final activeUser = _activeUserId;
-    if (activeUser.isNotEmpty) {
-      _chatRepository.startRelayListener(activeUser);
-      _chatRepository.syncService.reconcile(currentUserId: activeUser);
-    }
+    _ensureRelayListener();
+
     _conversationsSub = _conversationRepo
         .watchConversations(currentUserId: _activeUserId)
         .listen((conversations) {
@@ -79,6 +82,64 @@ class _InboxScreenState extends State<InboxScreen> {
     });
     _notificationSub = _chatRepository.notificationService.onNotificationDisplayed
         .listen((_) => _loadConversations());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scope = AppScope.maybeOf(context);
+    if (scope != null) {
+      if (widget.chatRepository == null && _chatRepository != scope.chatRepository) {
+        _chatRepository = scope.chatRepository;
+      }
+      if (widget.authRepository == null && _authRepository != scope.authRepository) {
+        _authRepository = scope.authRepository;
+      }
+    }
+    _ensureRelayListener();
+  }
+
+  @override
+  void didUpdateWidget(covariant InboxScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentUser != widget.currentUser ||
+        oldWidget.chatRepository != widget.chatRepository) {
+      if (widget.currentUser != null) {
+        _resolvedCurrentUser = widget.currentUser;
+      }
+      if (widget.chatRepository != null) {
+        _chatRepository = widget.chatRepository!;
+      }
+      _ensureRelayListener();
+      _loadConversations();
+    }
+  }
+
+  Future<void> _ensureRelayListener() async {
+    try {
+      String? resolvedId = widget.currentUser?.username ?? widget.currentUser?.id;
+      if (resolvedId == null || resolvedId.isEmpty || resolvedId == AppConstants.currentUserId) {
+        if (_resolvedCurrentUser != null && _resolvedCurrentUser!.username.isNotEmpty) {
+          resolvedId = _resolvedCurrentUser!.username;
+        } else {
+          try {
+            final user = await _authRepository.getCurrentUser();
+            if (user != null && user.username.isNotEmpty) {
+              _resolvedCurrentUser = user;
+              resolvedId = user.username;
+            }
+          } catch (_) {}
+        }
+      }
+
+      resolvedId ??= _chatRepository.database.activeUsername;
+      if (resolvedId != null && resolvedId.isNotEmpty && resolvedId != AppConstants.currentUserId) {
+        _chatRepository.startRelayListener(resolvedId);
+        try {
+          await _chatRepository.syncService.reconcile(currentUserId: resolvedId);
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
   @override
@@ -149,12 +210,13 @@ class _InboxScreenState extends State<InboxScreen> {
     final partnerId = conversation.partner.username.isNotEmpty
         ? conversation.partner.username
         : conversation.partner.id;
+    final effectiveUser = widget.currentUser ?? _resolvedCurrentUser;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => ChatScreen(
           partnerName: conversation.partner.displayName,
           partnerId: partnerId,
-          currentUser: widget.currentUser,
+          currentUser: effectiveUser,
           repository: _chatRepository,
           authRepository: _authRepository,
           isLoveConnection: conversation.isLoveConnection,

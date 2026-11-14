@@ -72,6 +72,9 @@ abstract class ChatRepository {
   // Active Relay Inbound Listener controls
   void startRelayListener(String currentUserId);
   void stopRelayListener();
+
+  // Local database reference
+  LocalDatabase get database;
 }
 
 /// Primary implementation coordinating local SQLite storage, E2EE, and chat transport
@@ -184,7 +187,10 @@ class LocalChatRepository implements ChatRepository {
 
   @override
   void startRelayListener(String currentUserId) {
-    _activeUserId = currentUserId;
+    if (currentUserId.isNotEmpty && currentUserId != AppConstants.currentUserId) {
+      _activeUserId = currentUserId;
+      _database.activeUsername = currentUserId;
+    }
     _syncService.startRelayListener(currentUserId: currentUserId);
   }
 
@@ -193,10 +199,27 @@ class LocalChatRepository implements ChatRepository {
     _syncService.stopRelayListener();
   }
 
+  /// Exposed local database reference for account and session coordination
+  @override
+  LocalDatabase get database => _database;
+
   String _resolveCurrentUserId(String? candidate) {
-    if (candidate != null && candidate.isNotEmpty) return candidate;
-    if (_activeUserId != null && _activeUserId!.isNotEmpty) return _activeUserId!;
-    return AppConstants.currentUserId;
+    if (candidate != null &&
+        candidate.isNotEmpty &&
+        candidate != AppConstants.currentUserId) {
+      return candidate;
+    }
+    if (_activeUserId != null &&
+        _activeUserId!.isNotEmpty &&
+        _activeUserId != AppConstants.currentUserId) {
+      return _activeUserId!;
+    }
+    if (_database.activeUsername != null &&
+        _database.activeUsername!.isNotEmpty &&
+        _database.activeUsername != AppConstants.currentUserId) {
+      return _database.activeUsername!;
+    }
+    return candidate ?? _activeUserId ?? _database.activeUsername ?? AppConstants.currentUserId;
   }
 
   /// Resolves the X25519 public identity key for a target recipient.
@@ -270,7 +293,10 @@ class LocalChatRepository implements ChatRepository {
 
   @override
   Future<void> sendMessage(ChatMessage message) async {
-    _activeUserId ??= message.senderId;
+    if (message.senderId.isNotEmpty && message.senderId != AppConstants.currentUserId) {
+      _activeUserId ??= message.senderId;
+      _database.activeUsername ??= message.senderId;
+    }
     // 1. Immediately persist locally in cleartext with initial 'sending' state
     final initial = message.copyWithStatus(MessageStatus.sending);
     await _database.saveMessage(initial);
@@ -442,7 +468,9 @@ class LocalChatRepository implements ChatRepository {
             continue;
           }
 
-          if (envelope.isTypingSignal || envelope.isPresenceSignal) {
+          if (envelope.isTypingSignal ||
+              envelope.isPresenceSignal ||
+              envelope.isSignalEnvelope) {
             await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
             continue;
           }

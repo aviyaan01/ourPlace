@@ -2,6 +2,7 @@ import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/models/ephemeral_relay_envelope.dart';
 import 'package:chatbox/services/relay_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
@@ -15,9 +16,13 @@ import 'package:flutter/foundation.dart';
 /// - Envelopes exceeding 24h TTL are automatically discarded and purged.
 class FirebaseRelayService implements RelayService {
   final FirebaseDatabase _database;
+  final FirebaseAuth _auth;
 
-  FirebaseRelayService({FirebaseDatabase? database})
-      : _database = database ?? _defaultDatabase();
+  FirebaseRelayService({
+    FirebaseDatabase? database,
+    FirebaseAuth? auth,
+  })  : _database = database ?? _defaultDatabase(),
+        _auth = auth ?? _defaultAuth();
 
   static FirebaseDatabase _defaultDatabase() {
     try {
@@ -27,6 +32,24 @@ class FirebaseRelayService implements RelayService {
       );
     } catch (_) {
       return FirebaseDatabase.instance;
+    }
+  }
+
+  static FirebaseAuth _defaultAuth() {
+    try {
+      return FirebaseAuth.instanceFor(app: Firebase.app());
+    } catch (_) {
+      return FirebaseAuth.instance;
+    }
+  }
+
+  Future<void> _ensureAuth() async {
+    try {
+      if (_auth.currentUser == null) {
+        await _auth.signInAnonymously();
+      }
+    } catch (e) {
+      debugPrint('FirebaseRelayService: _ensureAuth notice: $e');
     }
   }
 
@@ -49,6 +72,7 @@ class FirebaseRelayService implements RelayService {
     if (envelope.isExpired()) return;
 
     try {
+      await _ensureAuth();
       final json = envelope.toJson();
       await _messageRef(envelope.recipientId, envelope.id).set(json);
     } catch (e) {
@@ -60,6 +84,7 @@ class FirebaseRelayService implements RelayService {
   @override
   Future<List<EphemeralRelayEnvelope>> fetchPendingMessages(String recipientId) async {
     try {
+      await _ensureAuth();
       final snapshot = await _recipientRef(recipientId).get();
       if (!snapshot.exists || snapshot.value == null) {
         return const [];
@@ -97,6 +122,7 @@ class FirebaseRelayService implements RelayService {
 
   @override
   Stream<List<EphemeralRelayEnvelope>> watchPendingMessages(String recipientId) {
+    _ensureAuth().ignore();
     return _recipientRef(recipientId).onValue.map((event) {
       final raw = event.snapshot.value;
       if (raw == null || raw is! Map) return <EphemeralRelayEnvelope>[];
@@ -130,6 +156,7 @@ class FirebaseRelayService implements RelayService {
     required String recipientId,
   }) async {
     try {
+      await _ensureAuth();
       await _messageRef(recipientId, messageId).remove();
       return true;
     } catch (e) {
@@ -141,6 +168,7 @@ class FirebaseRelayService implements RelayService {
   @override
   Future<int> getPendingQueueCount(String recipientId) async {
     try {
+      await _ensureAuth();
       final snapshot = await _recipientRef(recipientId).get();
       if (!snapshot.exists || snapshot.value == null) return 0;
       final raw = snapshot.value;
@@ -155,6 +183,7 @@ class FirebaseRelayService implements RelayService {
   Future<int> purgeExpiredMessages() async {
     int purgedCount = 0;
     try {
+      await _ensureAuth();
       final snapshot = await _database.ref('relays').get();
       if (!snapshot.exists || snapshot.value == null) return 0;
       final raw = snapshot.value;

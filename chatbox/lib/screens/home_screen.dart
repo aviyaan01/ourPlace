@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:chatbox/main.dart';
 import 'package:chatbox/models/user.dart';
 import 'package:chatbox/repositories/auth_repository.dart';
 import 'package:chatbox/repositories/chat_repository.dart';
@@ -27,9 +28,16 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveChatRepo = chatRepository ?? LocalChatRepository();
-    final effectiveAuthRepo = authRepository ?? DefaultAuthRepository();
-    final effectiveLockService = appLockService ?? DefaultAppLockService();
+    final scope = AppScope.maybeOf(context);
+    final effectiveChatRepo = chatRepository ?? scope?.chatRepository ?? LocalChatRepository();
+    final effectiveAuthRepo = authRepository ?? scope?.authRepository ?? DefaultAuthRepository();
+    final effectiveLockService = appLockService ?? scope?.appLockService ?? DefaultAppLockService();
+
+    final activeUser = currentUser?.username;
+    if (activeUser != null && activeUser.isNotEmpty) {
+      effectiveChatRepo.startRelayListener(activeUser);
+      effectiveChatRepo.syncService.reconcile(currentUserId: activeUser);
+    }
 
     return InboxScreen(
       currentUser: currentUser,

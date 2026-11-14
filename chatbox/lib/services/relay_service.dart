@@ -224,3 +224,38 @@ class FirestoreRelayService implements RelayService {
     return _fallbackRelay.purgeExpiredMessages();
   }
 }
+
+/// Default RelayService that chooses FirebaseRelayService in production (or when Firebase is available)
+/// and InMemoryFirebaseRelayService in hermetic unit test environments.
+class DefaultRelayService implements RelayService {
+  final RelayService _delegate;
+
+  DefaultRelayService({RelayService? delegate})
+      : _delegate = delegate ??
+            (AppEnvironment.isProduction
+                ? FirebaseRelayService()
+                : InMemoryFirebaseRelayService.instance);
+
+  @override
+  Future<void> enqueueMessage(EphemeralRelayEnvelope envelope) =>
+      _delegate.enqueueMessage(envelope);
+
+  @override
+  Future<List<EphemeralRelayEnvelope>> fetchPendingMessages(String recipientId) =>
+      _delegate.fetchPendingMessages(recipientId);
+
+  @override
+  Stream<List<EphemeralRelayEnvelope>> watchPendingMessages(String recipientId) =>
+      _delegate.watchPendingMessages(recipientId);
+
+  @override
+  Future<bool> acknowledgeAndPurge(String messageId, {required String recipientId}) =>
+      _delegate.acknowledgeAndPurge(messageId, recipientId: recipientId);
+
+  @override
+  Future<int> getPendingQueueCount(String recipientId) =>
+      _delegate.getPendingQueueCount(recipientId);
+
+  @override
+  Future<int> purgeExpiredMessages() => _delegate.purgeExpiredMessages();
+}

@@ -28,6 +28,9 @@ class LocalDatabase {
 
   AppDatabase? _db;
 
+  /// Cache of active logged-in user to resolve queries when callers omit currentUserId
+  String? activeUsername;
+
   /// Internal getter for the Drift database instance
   AppDatabase get db {
     if (_db == null) {
@@ -126,6 +129,54 @@ class LocalDatabase {
   }
 
 
+  /// Construct expression that matches messages belonging to this 1-on-1 thread
+  /// between [partnerId] and the current user ([currentUserId] or [activeUsername]).
+  Expression<bool> _conversationFilter(
+    $MessagesTable tbl,
+    String partnerId,
+    String currentUserId,
+  ) {
+    final effectiveCurrent = (currentUserId.isNotEmpty && currentUserId != 'current_user')
+        ? currentUserId
+        : (activeUsername ?? currentUserId);
+
+    final cleanPartner = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
+    final atPartner = '@$cleanPartner';
+
+    final cleanCurrent = effectiveCurrent.startsWith('@')
+        ? effectiveCurrent.substring(1)
+        : effectiveCurrent;
+    final atCurrent = '@$cleanCurrent';
+
+    final partnerAliases = {partnerId, cleanPartner, atPartner};
+    final currentAliases = {
+      effectiveCurrent,
+      cleanCurrent,
+      atCurrent,
+      'current_user',
+      ?activeUsername,
+      if (activeUsername != null && activeUsername!.startsWith('@'))
+        activeUsername!.substring(1),
+      if (activeUsername != null && !activeUsername!.startsWith('@'))
+        '@${activeUsername!}',
+    };
+
+    Expression<bool>? partnerInvolved;
+    for (final p in partnerAliases) {
+      final exp = tbl.senderId.equals(p) | tbl.recipientId.equals(p);
+      partnerInvolved = partnerInvolved == null ? exp : (partnerInvolved | exp);
+    }
+
+    Expression<bool>? currentInvolved;
+    for (final c in currentAliases) {
+      final exp = tbl.senderId.equals(c) | tbl.recipientId.equals(c);
+      currentInvolved = currentInvolved == null ? exp : (currentInvolved | exp);
+    }
+
+    return (partnerInvolved ?? const Constant(true)) &
+        (currentInvolved ?? const Constant(true));
+  }
+
   /// Retrieve all messages for a partner, newest first (matching reverse list).
   /// Accounts for direct 1-on-1 messages as well as imported shared conversations.
   Future<List<ChatMessage>> getMessagesForPartner(
@@ -136,16 +187,23 @@ class LocalDatabase {
     final atPartner = '@$clean';
 
     final query = db.select(db.messages)
-      ..where((tbl) =>
-          tbl.senderId.equals(partnerId) |
-          tbl.recipientId.equals(partnerId) |
-          tbl.senderId.equals(clean) |
-          tbl.recipientId.equals(clean) |
-          tbl.senderId.equals(atPartner) |
-          tbl.recipientId.equals(atPartner))
+      ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId))
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
 
-    final rows = await query.get();
+    var rows = await query.get();
+    if (rows.isEmpty) {
+      // Fallback for imported shared conversations where current user wasn't an original participant
+      final fallbackQuery = db.select(db.messages)
+        ..where((tbl) =>
+            tbl.senderId.equals(partnerId) |
+            tbl.recipientId.equals(partnerId) |
+            tbl.senderId.equals(clean) |
+            tbl.recipientId.equals(clean) |
+            tbl.senderId.equals(atPartner) |
+            tbl.recipientId.equals(atPartner))
+        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
+      rows = await fallbackQuery.get();
+    }
     return rows.map(_rowToMessage).toList();
   }
 
@@ -160,17 +218,24 @@ class LocalDatabase {
     final atPartner = '@$clean';
 
     final query = db.select(db.messages)
-      ..where((tbl) =>
-          tbl.senderId.equals(partnerId) |
-          tbl.recipientId.equals(partnerId) |
-          tbl.senderId.equals(clean) |
-          tbl.recipientId.equals(clean) |
-          tbl.senderId.equals(atPartner) |
-          tbl.recipientId.equals(atPartner))
+      ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId))
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
       ..limit(limit, offset: offset);
 
-    final rows = await query.get();
+    var rows = await query.get();
+    if (rows.isEmpty && offset == 0) {
+      final fallbackQuery = db.select(db.messages)
+        ..where((tbl) =>
+            tbl.senderId.equals(partnerId) |
+            tbl.recipientId.equals(partnerId) |
+            tbl.senderId.equals(clean) |
+            tbl.recipientId.equals(clean) |
+            tbl.senderId.equals(atPartner) |
+            tbl.recipientId.equals(atPartner))
+        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
+        ..limit(limit, offset: offset);
+      rows = await fallbackQuery.get();
+    }
     return rows.map(_rowToMessage).toList();
   }
 
@@ -178,10 +243,24 @@ class LocalDatabase {
   Future<List<String>> getDistinctChatPartners({
     String currentUserId = 'current_user',
   }) async {
-    final cleanCurrent = currentUserId.startsWith('@')
-        ? currentUserId.substring(1)
-        : currentUserId;
+    final effectiveCurrent = (currentUserId.isNotEmpty && currentUserId != 'current_user')
+        ? currentUserId
+        : (activeUsername ?? currentUserId);
+    final cleanCurrent = effectiveCurrent.startsWith('@')
+        ? effectiveCurrent.substring(1)
+        : effectiveCurrent;
     final atCurrent = '@$cleanCurrent';
+    final currentAliases = {
+      effectiveCurrent,
+      cleanCurrent,
+      atCurrent,
+      'current_user',
+      ?activeUsername,
+      if (activeUsername != null && activeUsername!.startsWith('@'))
+        activeUsername!.substring(1),
+      if (activeUsername != null && !activeUsername!.startsWith('@'))
+        '@${activeUsername!}',
+    };
 
     final query = db.select(db.messages)
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
@@ -192,10 +271,10 @@ class LocalDatabase {
       final s = row.senderId;
       final r = row.recipientId;
 
-      if (s != currentUserId && s != 'current_user' && s != cleanCurrent && s != atCurrent) {
+      if (!currentAliases.contains(s) && s.isNotEmpty) {
         partners.add(s);
       }
-      if (r != currentUserId && r != 'current_user' && r != cleanCurrent && r != atCurrent) {
+      if (!currentAliases.contains(r) && r.isNotEmpty) {
         partners.add(r);
       }
     }
@@ -211,6 +290,17 @@ class LocalDatabase {
     final atPartner = '@$clean';
 
     final query = db.select(db.messages)
+      ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId))
+      ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
+      ..limit(1);
+
+    final rows = await query.get();
+    if (rows.isNotEmpty) {
+      return _rowToMessage(rows.first);
+    }
+
+    // Fallback for imported shared conversations
+    final fallbackQuery = db.select(db.messages)
       ..where((tbl) =>
           tbl.senderId.equals(partnerId) |
           tbl.recipientId.equals(partnerId) |
@@ -221,9 +311,9 @@ class LocalDatabase {
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
       ..limit(1);
 
-    final rows = await query.get();
-    if (rows.isNotEmpty) {
-      return _rowToMessage(rows.first);
+    final fallbackRows = await fallbackQuery.get();
+    if (fallbackRows.isNotEmpty) {
+      return _rowToMessage(fallbackRows.first);
     }
     return null;
   }
@@ -235,13 +325,19 @@ class LocalDatabase {
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
+    final partnerAliases = {partnerId, clean, atPartner};
 
     final query = db.select(db.messages)
-      ..where((tbl) =>
-          (tbl.senderId.equals(partnerId) |
-              tbl.senderId.equals(clean) |
-              tbl.senderId.equals(atPartner)) &
-          tbl.status.equals(MessageStatus.read.name).not());
+      ..where((tbl) {
+        Expression<bool>? senderMatches;
+        for (final p in partnerAliases) {
+          final exp = tbl.senderId.equals(p);
+          senderMatches = senderMatches == null ? exp : (senderMatches | exp);
+        }
+        return _conversationFilter(tbl, partnerId, currentUserId) &
+            (senderMatches ?? const Constant(true)) &
+            tbl.status.equals(MessageStatus.read.name).not();
+      });
 
     final rows = await query.get();
     return rows.length;
@@ -256,16 +352,25 @@ class LocalDatabase {
     final atPartner = '@$clean';
 
     final query = db.select(db.messages)
-      ..where((tbl) =>
-          tbl.senderId.equals(partnerId) |
-          tbl.recipientId.equals(partnerId) |
-          tbl.senderId.equals(clean) |
-          tbl.recipientId.equals(clean) |
-          tbl.senderId.equals(atPartner) |
-          tbl.recipientId.equals(atPartner))
+      ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId))
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
 
-    return query.watch().map((rows) => rows.map(_rowToMessage).toList());
+    return query.watch().asyncMap((rows) async {
+      if (rows.isNotEmpty) {
+        return rows.map(_rowToMessage).toList();
+      }
+      final fallbackQuery = db.select(db.messages)
+        ..where((tbl) =>
+            tbl.senderId.equals(partnerId) |
+            tbl.recipientId.equals(partnerId) |
+            tbl.senderId.equals(clean) |
+            tbl.recipientId.equals(clean) |
+            tbl.senderId.equals(atPartner) |
+            tbl.recipientId.equals(atPartner))
+        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
+      final fallbackRows = await fallbackQuery.get();
+      return fallbackRows.map(_rowToMessage).toList();
+    });
   }
 
   /// Search messages by content (direct or imported)
@@ -279,16 +384,24 @@ class LocalDatabase {
 
     final q = db.select(db.messages)
       ..where((tbl) =>
-          (tbl.senderId.equals(partnerId) |
-              tbl.recipientId.equals(partnerId) |
-              tbl.senderId.equals(clean) |
-              tbl.recipientId.equals(clean) |
-              tbl.senderId.equals(atPartner) |
-              tbl.recipientId.equals(atPartner)) &
+          _conversationFilter(tbl, partnerId, currentUserId) &
           tbl.messageText.contains(query))
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
 
-    final rows = await q.get();
+    var rows = await q.get();
+    if (rows.isEmpty) {
+      final fallbackQ = db.select(db.messages)
+        ..where((tbl) =>
+            (tbl.senderId.equals(partnerId) |
+                tbl.recipientId.equals(partnerId) |
+                tbl.senderId.equals(clean) |
+                tbl.recipientId.equals(clean) |
+                tbl.senderId.equals(atPartner) |
+                tbl.recipientId.equals(atPartner)) &
+            tbl.messageText.contains(query))
+        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
+      rows = await fallbackQ.get();
+    }
     return rows.map(_rowToMessage).toList();
   }
 
@@ -341,16 +454,48 @@ class LocalDatabase {
     String? partnerId,
     String currentUserId = 'current_user',
   }) async {
+    final effectiveCurrent = (currentUserId.isNotEmpty && currentUserId != 'current_user')
+        ? currentUserId
+        : (activeUsername ?? currentUserId);
+    final cleanCurrent = effectiveCurrent.startsWith('@')
+        ? effectiveCurrent.substring(1)
+        : effectiveCurrent;
+    final atCurrent = '@$cleanCurrent';
+    final currentAliases = {
+      effectiveCurrent,
+      cleanCurrent,
+      atCurrent,
+      'current_user',
+      ?activeUsername,
+      if (activeUsername != null && activeUsername!.startsWith('@'))
+        activeUsername!.substring(1),
+      if (activeUsername != null && !activeUsername!.startsWith('@'))
+        '@${activeUsername!}',
+    };
+
     final query = db.select(db.messages)
       ..where((tbl) {
-        final senderCheck = tbl.senderId.equals(currentUserId) |
-            tbl.senderId.equals('current_user');
+        Expression<bool>? senderCheck;
+        for (final c in currentAliases) {
+          final exp = tbl.senderId.equals(c);
+          senderCheck = senderCheck == null ? exp : (senderCheck | exp);
+        }
         final statusCheck = tbl.status.equals(MessageStatus.sending.name) |
             tbl.status.equals(MessageStatus.failed.name);
         if (partnerId != null && partnerId.isNotEmpty) {
-          return senderCheck & statusCheck & tbl.recipientId.equals(partnerId);
+          final cleanPartner = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
+          final atPartner = '@$cleanPartner';
+          final partnerAliases = {partnerId, cleanPartner, atPartner};
+          Expression<bool>? recipientCheck;
+          for (final p in partnerAliases) {
+            final exp = tbl.recipientId.equals(p);
+            recipientCheck = recipientCheck == null ? exp : (recipientCheck | exp);
+          }
+          return (senderCheck ?? const Constant(true)) &
+              statusCheck &
+              (recipientCheck ?? const Constant(true));
         }
-        return senderCheck & statusCheck;
+        return (senderCheck ?? const Constant(true)) & statusCheck;
       })
       ..orderBy([(tbl) => OrderingTerm.asc(tbl.timestamp)]);
 
@@ -384,15 +529,20 @@ class LocalDatabase {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
 
-    await (db.delete(db.messages)
-          ..where((tbl) =>
-              tbl.senderId.equals(partnerId) |
-              tbl.recipientId.equals(partnerId) |
-              tbl.senderId.equals(clean) |
-              tbl.recipientId.equals(clean) |
-              tbl.senderId.equals(atPartner) |
-              tbl.recipientId.equals(atPartner)))
+    final count = await (db.delete(db.messages)
+          ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId)))
         .go();
+    if (count == 0) {
+      await (db.delete(db.messages)
+            ..where((tbl) =>
+                tbl.senderId.equals(partnerId) |
+                tbl.recipientId.equals(partnerId) |
+                tbl.senderId.equals(clean) |
+                tbl.recipientId.equals(clean) |
+                tbl.senderId.equals(atPartner) |
+                tbl.recipientId.equals(atPartner)))
+          .go();
+    }
   }
 
   /// Get total message count for a partner (direct or imported)
@@ -400,11 +550,19 @@ class LocalDatabase {
     String partnerId, {
     String currentUserId = 'current_user',
   }) async {
-    final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
-    final atPartner = '@$clean';
-
     final countExp = db.messages.id.count();
     final query = db.selectOnly(db.messages)
+      ..addColumns([countExp])
+      ..where(_conversationFilter(db.messages, partnerId, currentUserId));
+
+    final result = await query.map((row) => row.read(countExp)).getSingle();
+    final count = result ?? 0;
+    if (count > 0) return count;
+
+    // Fallback for imported shared conversations
+    final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
+    final atPartner = '@$clean';
+    final fallbackQuery = db.selectOnly(db.messages)
       ..addColumns([countExp])
       ..where(db.messages.senderId.equals(partnerId) |
           db.messages.recipientId.equals(partnerId) |
@@ -413,8 +571,8 @@ class LocalDatabase {
           db.messages.senderId.equals(atPartner) |
           db.messages.recipientId.equals(atPartner));
 
-    final result = await query.map((row) => row.read(countExp)).getSingle();
-    return result ?? 0;
+    final fallbackResult = await fallbackQuery.map((row) => row.read(countExp)).getSingle();
+    return fallbackResult ?? 0;
   }
 
   // ==================== USER ACCOUNT CONVERSIONS & CRUD ====================

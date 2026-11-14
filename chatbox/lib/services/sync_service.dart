@@ -291,6 +291,9 @@ class DefaultSyncService implements SyncService {
           MessageStatus.read,
         );
         await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
+      } else if (envelope.isSignalEnvelope) {
+        // Ephemeral signal or control envelope: purge and discard to prevent ghost messages
+        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
       } else {
         // Standard incoming message
         final raw = ChatMessage(

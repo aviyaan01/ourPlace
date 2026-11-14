@@ -13,7 +13,7 @@ class ChatService {
 
   /// Default constructor allowing injection of custom [RelayService] (for tests/environments)
   ChatService({RelayService? relayService})
-      : _relayService = relayService ?? InMemoryFirebaseRelayService.instance;
+      : _relayService = relayService ?? DefaultRelayService();
 
   /// Factory constructor returning the singleton instance for backward compatibility
   factory ChatService.singleton() => instance;

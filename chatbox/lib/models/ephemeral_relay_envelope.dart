@@ -421,19 +421,30 @@ class EphemeralRelayEnvelope {
       envelopeType == 'delivery_receipt' || envelopeType == 'read_receipt';
 
   /// Whether this envelope is a delivery receipt
-  bool get isDeliveryReceipt => envelopeType == 'delivery_receipt';
+  bool get isDeliveryReceipt =>
+      envelopeType == 'delivery_receipt' ||
+      id.startsWith('receipt_del_') ||
+      id.startsWith('receipt_delivery_');
 
   /// Whether this envelope is a read receipt
-  bool get isReadReceipt => envelopeType == 'read_receipt';
+  bool get isReadReceipt =>
+      envelopeType == 'read_receipt' || id.startsWith('receipt_read_');
 
   /// Whether this envelope is an ephemeral real-time typing indicator
-  bool get isTypingSignal => envelopeType == 'typing';
+  bool get isTypingSignal =>
+      envelopeType == 'typing' ||
+      id.startsWith('sig_typing_') ||
+      (id.contains('typing') && (ciphertextPayload == 'true' || ciphertextPayload == 'false'));
 
   /// Whether typing indicator is actively active
   bool get isTypingActive => isTypingSignal && ciphertextPayload == 'true';
 
   /// Whether this envelope is an ephemeral presence heartbeat
-  bool get isPresenceSignal => envelopeType == 'presence';
+  bool get isPresenceSignal =>
+      envelopeType == 'presence' ||
+      id.startsWith('sig_presence_') ||
+      (ciphertextPayload.contains('"isOnline"') &&
+          ciphertextPayload.startsWith('{'));
 
   /// Whether this envelope is an ephemeral Love Connection handshake signal (Phase 16)
   bool get isLoveConnectionSignal =>
@@ -441,23 +452,34 @@ class EphemeralRelayEnvelope {
       envelopeType == 'love_accept' ||
       envelopeType == 'love_decline' ||
       envelopeType == 'love_cancel' ||
-      envelopeType == 'love_unlink';
+      envelopeType == 'love_unlink' ||
+      id.startsWith('love_req_') ||
+      id.startsWith('love_acc_') ||
+      id.startsWith('love_dec_') ||
+      id.startsWith('love_can_') ||
+      id.startsWith('love_unl_');
 
   /// Whether this envelope is an ephemeral Love Conversation Sharing signal (Phase 17)
   bool get isLoveShareSignal =>
       envelopeType == 'love_share_claim' ||
       envelopeType == 'love_share_reject' ||
       envelopeType == 'love_share_bundle' ||
-      envelopeType == 'love_share_ack';
+      envelopeType == 'love_share_ack' ||
+      id.startsWith('love_sh_');
 
   /// Whether this envelope is an ephemeral "Send luv" burst signal (Phase 18)
-  bool get isLoveLuvSignal => envelopeType == 'love_luv_burst';
+  bool get isLoveLuvSignal =>
+      envelopeType == 'love_luv_burst' ||
+      id.startsWith('sig_luv_') ||
+      ciphertextPayload == 'luv_burst';
 
   /// Whether this envelope is an ephemeral message reaction signal (Phase 18)
-  bool get isReactionSignal => envelopeType == 'message_reaction';
+  bool get isReactionSignal =>
+      envelopeType == 'message_reaction' || id.startsWith('sig_react_');
 
   /// Whether this envelope is an ephemeral Love Note signal (Phase 18)
-  bool get isLoveNoteSignal => envelopeType == 'love_note';
+  bool get isLoveNoteSignal =>
+      envelopeType == 'love_note' || id.startsWith('love_note_');
 
   /// Whether this envelope is any couple feature signal (Phase 18)
   bool get isCoupleFeatureSignal =>
@@ -466,6 +488,18 @@ class EphemeralRelayEnvelope {
   /// Whether this envelope is any ephemeral Love subsystem signal (Phase 16, 17 & 18)
   bool get isLoveSignal =>
       isLoveConnectionSignal || isLoveShareSignal || isCoupleFeatureSignal;
+
+  /// Whether this envelope is any control or signal envelope (not a standard chat message)
+  bool get isSignalEnvelope =>
+      isDeliveryReceipt ||
+      isReadReceipt ||
+      isTypingSignal ||
+      isPresenceSignal ||
+      isLoveSignal ||
+      envelopeType != 'message' ||
+      id.startsWith('sig_') ||
+      id.startsWith('receipt_') ||
+      id.startsWith('love_');
 
   /// Target message ID for receipt envelopes
   String get targetMessageId => ciphertextPayload;
@@ -491,12 +525,47 @@ class EphemeralRelayEnvelope {
 
   /// Reconstruct an envelope from a JSON map
   factory EphemeralRelayEnvelope.fromJson(Map<String, dynamic> json) {
+    final rawType = json['type'] as String?;
+    final id = json['id'] as String;
+    String resolvedType = rawType ?? 'message';
+    if (rawType == null) {
+      if (id.startsWith('sig_typing_')) {
+        resolvedType = 'typing';
+      } else if (id.startsWith('sig_presence_')) {
+        resolvedType = 'presence';
+      } else if (id.startsWith('receipt_del_')) {
+        resolvedType = 'delivery_receipt';
+      } else if (id.startsWith('receipt_read_')) {
+        resolvedType = 'read_receipt';
+      } else if (id.startsWith('love_req_')) {
+        resolvedType = 'love_request';
+      } else if (id.startsWith('love_acc_')) {
+        resolvedType = 'love_accept';
+      } else if (id.startsWith('love_dec_')) {
+        resolvedType = 'love_decline';
+      } else if (id.startsWith('love_can_')) {
+        resolvedType = 'love_cancel';
+      } else if (id.startsWith('love_unl_')) {
+        resolvedType = 'love_unlink';
+      } else if (id.startsWith('love_sh_clm_')) {
+        resolvedType = 'love_share_claim';
+      } else if (id.startsWith('love_sh_ack_')) {
+        resolvedType = 'love_share_ack';
+      } else if (id.startsWith('sig_luv_')) {
+        resolvedType = 'love_luv_burst';
+      } else if (id.startsWith('sig_react_')) {
+        resolvedType = 'message_reaction';
+      } else if (id.startsWith('love_note_')) {
+        resolvedType = 'love_note';
+      }
+    }
+
     return EphemeralRelayEnvelope(
-      id: json['id'] as String,
+      id: id,
       senderId: json['sender_id'] as String,
       recipientId: json['recipient_id'] as String,
       ciphertextPayload: json['ciphertext'] as String,
-      envelopeType: json['type'] as String? ?? 'message',
+      envelopeType: resolvedType,
       timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
       expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? '') ??
           DateTime.now().add(const Duration(hours: 48)),
