@@ -21,6 +21,7 @@
 12. [Real-Time Typing Indicators & Ephemeral Presence Flow](#12-real-time-typing-indicators--ephemeral-presence-flow)
 13. [Push Notification Silent Wake-up & Privacy Alerts Flow](#13-push-notification-silent-wake-up--privacy-alerts-flow)
 14. [Couple-Specific Features & Ephemeral Micro-Interactions Flow](#14-couple-specific-features--ephemeral-micro-interactions-flow)
+15. [10,000+ Concurrent Users Scalable Architecture Flow](#15-10000-concurrent-users-scalable-architecture-flow)
 
 ---
 
@@ -918,4 +919,122 @@ sequenceDiagram
     NotesScreen->>LocalDB: markLoveNoteOpened(noteId)
     Note over NotesScreen: Card transitions from sealed to unsealed with timestamp
 ```
+
+---
+
+## 15. 10,000+ Concurrent Users Scalable Architecture Flow
+
+### 15.1 Realtime Database Data Topology (10k Concurrency)
+
+```mermaid
+flowchart TD
+    subgraph RTDB["Firebase Realtime Database (10,000+ Users Scale)"]
+        Usernames["/usernames/{username}<br/>= {uid}<br/>(Atomic Claim; .indexOn: .value)"]
+        UsersProfile["/users/{uid}/profile<br/>= {username, publicIdentityKey, createdAt}"]
+        UsersPrivate["/users/{uid}/private/fcm<br/>= {fcmToken}"]
+        Inbox["/inbox/{recipientUid}/{pushId}<br/>= {id, senderUid, senderUsername, ciphertext, type, timestamp, expiresAt}"]
+        Presence["/presence/{uid}<br/>= {online: boolean, lastSeen: timestamp}<br/>(Driven by .info/connected & onDisconnect)"]
+        Typing["/typing/{chatId}/{uid}<br/>= boolean<br/>(Scoped to active thread only)"]
+    end
+
+    subgraph Clients["10,000 Concurrent Connected Clients"]
+        ClientA["Sender Client A"]
+        ClientB["Recipient Client B"]
+    end
+
+    subgraph Functions["Cloud Functions Engine"]
+        FCMTrigger["onMessageCreated Trigger<br/>(Data-only silent push; zero plaintext)"]
+        HourlyCleanup["Hourly Scheduled Cron<br/>(30-day inbox & media blob purge)"]
+        RateLimiter["Rate Limiter<br/>(< 100 msgs/min per sender)"]
+    end
+
+    ClientA -->|1. Atomic Username Reservation| Usernames
+    ClientA -->|2. Fast Prefix Lookup (limitToFirst 20)| Usernames
+    Usernames -->|Resolve UID| UsersProfile
+    ClientA -->|3. Push E2EE Envelope with Backoff| Inbox
+    Inbox -->|onCreate Trigger| FCMTrigger
+    FCMTrigger -->|Silent Wakeup Ping| ClientB
+    Inbox -->|4. onChildAdded Stream| ClientB
+    ClientB -->|5. Atomic .remove() ACK| Inbox
+    ClientA <-->|Socket Disconnect Sync| Presence
+    ClientA <-->|Scoped Chat Typing| Typing
+    Functions --> HourlyCleanup
+    Inbox --> RateLimiter
+```
+
+### 15.2 Scalable End-to-End Send, Receive & Atomic ACK Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Alice as Alice Device (@alice)
+    participant AliceDB as Alice SQLite (Drift)
+    participant RTDBInbox as RTDB /inbox/{bobUid}/{pushId}
+    participant CloudFn as Cloud Functions (onMessageCreated)
+    participant FCM as Firebase Cloud Messaging
+    participant BobSync as Bob SyncService (onChildAdded)
+    participant BobDB as Bob SQLite (Drift)
+    actor Bob as Bob Device (@bob)
+
+    Alice->>AliceDB: saveMessage(status: sending)
+    Alice->>Alice: Encrypt payload with Bob X25519 public key + AES-GCM
+    Alice->>RTDBInbox: .push().set({id, senderUid, senderUsername, ciphertext, type, timestamp, expiresAt})
+    Note over Alice,RTDBInbox: Exponential backoff retry with jitter up to 3 retries
+    Alice->>AliceDB: updateMessageStatus(status: sent)
+
+    RTDBInbox-->>CloudFn: Trigger onMessageCreated
+    CloudFn->>FCM: Send data-only silent background wakeup (zero plaintext)
+    FCM-->>Bob: Wakeup ping (app drains inbox if backgrounded)
+
+    RTDBInbox-->>BobSync: onChildAdded event stream
+    BobSync->>BobSync: Decrypt payload (X25519 + AES-GCM)
+    alt Decryption Succeeded
+        BobSync->>BobDB: saveMessage(decryptedMessage, status: delivered)
+        BobSync->>RTDBInbox: .remove() (ATOMIC ACK PURGE)
+        BobSync->>Alice: Dispatch delivery receipt
+    else Decryption Failed (< 3 attempts)
+        Note over BobSync: Envelope kept in queue for connection retry
+    else Decryption Failed (>= 3 attempts)
+        BobSync->>BobDB: saveMessage("[Undecryptable Message]", status: delivered, quarantine)
+        BobSync->>RTDBInbox: .remove() (UNBLOCK QUEUE ACK)
+    end
+```
+
+### 15.3 Scalable User Prefix Search with Debounce & MITM Key Verification
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User UI
+    participant SearchUI as InboxScreen Search Bar
+    participant Cache as In-Memory Cache (TTL 60s, max 100)
+    participant Directory as UserDirectoryService
+    participant RTDB as RTDB /usernames
+    participant LocalDB as Local SQLite (Known Contacts)
+
+    User->>SearchUI: Types handle "twi"
+    Note over SearchUI: 300ms debounce timer started; prior queries cancelled
+    SearchUI->>Directory: searchUsers("twi") (Length >= 3 check)
+    Directory->>Cache: Check "twi" in search cache
+    alt Cache Hit (< 60s)
+        Cache-->>Directory: Return cached DirectoryProfile list
+    else Cache Miss
+        Directory->>RTDB: orderByKey().startAt("twi").endAt("twi\uf8ff").limitToFirst(20)
+        RTDB-->>Directory: Return matching handles and UIDs
+        Directory->>Cache: Store results in cache (LRU eviction if > 100)
+    end
+    Directory-->>SearchUI: Return discovered profiles
+
+    loop For each discovered profile
+        SearchUI->>LocalDB: getAccountByUsername(profile.username)
+        alt Known Contact & Keys Match
+            Note over SearchUI: Render blue "Verified" checkmark badge
+        else Known Contact & Keys Differ
+            Note over SearchUI: Render prominent amber/red "Key Changed (Safety Number Mismatch)" warning
+        else Unknown New User
+            Note over SearchUI: Render standard profile tile
+        end
+    end
+```
+
 

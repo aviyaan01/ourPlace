@@ -26,6 +26,15 @@ class EphemeralRelayEnvelope {
   /// Type of relay envelope: message, delivery_receipt, or read_receipt (Phase 12)
   final String envelopeType;
 
+  /// Optional remote RTDB pushId for /inbox/{uid}/{pushId} node
+  final String? pushId;
+
+  /// Optional Firebase Auth UID of sender
+  final String? senderUid;
+
+  /// Optional Firebase Auth UID of recipient
+  final String? recipientUid;
+
   const EphemeralRelayEnvelope({
     required this.id,
     required this.senderId,
@@ -34,6 +43,9 @@ class EphemeralRelayEnvelope {
     required this.timestamp,
     required this.expiresAt,
     this.envelopeType = 'message',
+    this.pushId,
+    this.senderUid,
+    this.recipientUid,
   });
 
   /// Factory constructor to create an envelope with a standard 48-hour default TTL
@@ -515,18 +527,21 @@ class EphemeralRelayEnvelope {
     return {
       'id': id,
       'sender_id': senderId,
+      'senderUid': senderUid ?? senderId,
+      'senderUsername': senderId,
       'recipient_id': recipientId,
       'ciphertext': ciphertextPayload,
       'type': envelopeType,
       'timestamp': timestamp.toIso8601String(),
       'expires_at': expiresAt.toIso8601String(),
+      'expiresAt': expiresAt.millisecondsSinceEpoch,
     };
   }
 
   /// Reconstruct an envelope from a JSON map
   factory EphemeralRelayEnvelope.fromJson(Map<String, dynamic> json) {
     final rawType = json['type'] as String?;
-    final id = json['id'] as String;
+    final id = (json['id'] ?? '') as String;
     String resolvedType = rawType ?? 'message';
     if (rawType == null) {
       if (id.startsWith('sig_typing_')) {
@@ -560,15 +575,27 @@ class EphemeralRelayEnvelope {
       }
     }
 
+    final rawTimestamp = json['timestamp'];
+    final timestamp = rawTimestamp is int
+        ? DateTime.fromMillisecondsSinceEpoch(rawTimestamp, isUtc: true)
+        : DateTime.tryParse(rawTimestamp?.toString() ?? '') ?? DateTime.now().toUtc();
+    final rawExpires = json['expires_at'] ?? json['expiresAt'];
+    final expiresAt = rawExpires is int
+        ? DateTime.fromMillisecondsSinceEpoch(rawExpires, isUtc: true)
+        : DateTime.tryParse(rawExpires?.toString() ?? '') ??
+            timestamp.add(const Duration(hours: 48));
+
     return EphemeralRelayEnvelope(
       id: id,
-      senderId: json['sender_id'] as String,
-      recipientId: json['recipient_id'] as String,
-      ciphertextPayload: json['ciphertext'] as String,
+      senderId: (json['sender_id'] ?? json['senderUsername'] ?? json['senderUid'] ?? '') as String,
+      recipientId: (json['recipient_id'] ?? json['recipientUid'] ?? '') as String,
+      ciphertextPayload: (json['ciphertext'] ?? json['ciphertextPayload'] ?? '') as String,
       envelopeType: resolvedType,
-      timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ?? DateTime.now(),
-      expiresAt: DateTime.tryParse(json['expires_at'] as String? ?? '') ??
-          DateTime.now().add(const Duration(hours: 48)),
+      timestamp: timestamp,
+      expiresAt: expiresAt,
+      pushId: json['_pushId'] as String?,
+      senderUid: json['senderUid'] as String?,
+      recipientUid: json['recipientUid'] as String?,
     );
   }
 

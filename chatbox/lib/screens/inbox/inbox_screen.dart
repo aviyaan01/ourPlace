@@ -11,6 +11,7 @@ import 'package:chatbox/repositories/conversation_repository.dart';
 import 'package:chatbox/screens/chat_screen.dart';
 import 'package:chatbox/widgets/conversation_tile.dart';
 import 'package:chatbox/services/user_directory_service.dart';
+import 'package:chatbox/core/utils/hash_utils.dart';
 
 /// Primary Inbox Screen displaying Love Connection and multi-user conversations
 class InboxScreen extends StatefulWidget {
@@ -46,6 +47,10 @@ class _InboxScreenState extends State<InboxScreen> {
   List<DirectoryProfile> _remoteSearchResults = [];
   Timer? _searchDebounceTimer;
   bool _isLoading = true;
+  bool _isSearchingRemote = false;
+  String? _searchError;
+  int _searchRequestId = 0;
+  final Map<String, String?> _knownPublicKeys = {};
   String _searchQuery = '';
   User? _resolvedCurrentUser;
 
@@ -153,7 +158,7 @@ class _InboxScreenState extends State<InboxScreen> {
   }
 
   void _applySearchFilter() {
-    final query = _searchQuery;
+    final query = _searchQuery.trim().toLowerCase();
     if (query.isEmpty) {
       _filteredConversations = _allConversations;
     } else {
@@ -167,27 +172,54 @@ class _InboxScreenState extends State<InboxScreen> {
   }
 
   void _onSearchChanged() {
-    final query = _searchController.text.trim().toLowerCase();
+    final query = _searchController.text.trim();
+    final clean = HashUtils.rawUsername(query);
     setState(() {
       _searchQuery = query;
       _applySearchFilter();
+      _searchError = null;
     });
 
     _searchDebounceTimer?.cancel();
-    if (query.isNotEmpty) {
+    _searchRequestId++;
+    final currentRequestId = _searchRequestId;
+
+    if (clean.length >= 3) {
+      setState(() {
+        _isSearchingRemote = true;
+      });
       _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () async {
         try {
-          final results = await DefaultUserDirectoryService().searchUsers(query);
-          if (mounted && _searchQuery == query) {
+          final results = await DefaultUserDirectoryService().searchUsers(clean);
+          if (_searchRequestId != currentRequestId || !mounted) return;
+
+          for (final p in results) {
+            final acc = await _chatRepository.database.getAccountByUsername(p.username);
+            if (acc != null) {
+              _knownPublicKeys[p.username] = acc.publicIdentityKey;
+            }
+          }
+
+          if (mounted && _searchRequestId == currentRequestId) {
             setState(() {
               _remoteSearchResults = results;
+              _isSearchingRemote = false;
+              _searchError = null;
             });
           }
-        } catch (_) {}
+        } catch (e) {
+          if (mounted && _searchRequestId == currentRequestId) {
+            setState(() {
+              _isSearchingRemote = false;
+              _searchError = 'Search failed, check connection';
+            });
+          }
+        }
       });
     } else {
       setState(() {
         _remoteSearchResults = [];
+        _isSearchingRemote = false;
       });
     }
   }
@@ -308,6 +340,67 @@ class _InboxScreenState extends State<InboxScreen> {
                               padding: const EdgeInsets.only(bottom: 24),
                               children: [
                                 if (_searchQuery.isNotEmpty) ...[
+                                  if (HashUtils.rawUsername(_searchQuery).length < 3)
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(horizontal: 22.0, vertical: 8.0),
+                                      child: Text(
+                                        'Type at least 3 characters to search network users',
+                                        style: TextStyle(
+                                          color: Colors.white38,
+                                          fontSize: 12,
+                                          fontStyle: FontStyle.italic,
+                                        ),
+                                      ),
+                                    ),
+
+                                  if (_isSearchingRemote)
+                                    const Padding(
+                                      padding: EdgeInsets.symmetric(vertical: 16),
+                                      child: Center(
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            SizedBox(
+                                              width: 14,
+                                              height: 14,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Colors.white70,
+                                              ),
+                                            ),
+                                            SizedBox(width: 10),
+                                            Text(
+                                              'Searching network users...',
+                                              style: TextStyle(color: Colors.white54, fontSize: 13),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+
+                                  if (_searchError != null)
+                                    Container(
+                                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                      decoration: BoxDecoration(
+                                        color: Colors.red.withValues(alpha: 0.15),
+                                        borderRadius: BorderRadius.circular(12),
+                                        border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.wifi_off_rounded, color: Colors.redAccent, size: 18),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              _searchError!,
+                                              style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+
                                   /// Local conversation search matches
                                   if (_filteredConversations.isNotEmpty) ...[
                                     _buildSectionHeader(
@@ -329,17 +422,26 @@ class _InboxScreenState extends State<InboxScreen> {
                                       hasAccent: true,
                                     ),
                                     ..._remoteSearchResults.map((profile) {
-                                      final clean = profile.username.replaceAll('@', '');
-                                      final displayName = clean.isNotEmpty
-                                          ? clean[0].toUpperCase() + clean.substring(1)
+                                      final cleanHandle = HashUtils.rawUsername(profile.username);
+                                      final displayName = cleanHandle.isNotEmpty
+                                          ? cleanHandle[0].toUpperCase() + cleanHandle.substring(1)
                                           : profile.username;
                                       final partnerUser = User(
-                                        id: 'user_$clean',
+                                        id: 'user_$cleanHandle',
                                         username: profile.username,
                                         displayName: displayName,
                                         publicIdentityKey: profile.publicIdentityKey,
                                         isCurrentUser: false,
                                       );
+
+                                      final hasKnownKey = _knownPublicKeys.containsKey(profile.username);
+                                      final knownKey = _knownPublicKeys[profile.username];
+                                      final keyChanged = hasKnownKey &&
+                                          knownKey != null &&
+                                          knownKey.isNotEmpty &&
+                                          knownKey != profile.publicIdentityKey;
+                                      final isVerified = hasKnownKey && knownKey == profile.publicIdentityKey;
+
                                       return ListTile(
                                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                                         leading: CircleAvatar(
@@ -352,12 +454,46 @@ class _InboxScreenState extends State<InboxScreen> {
                                             ),
                                           ),
                                         ),
-                                        title: Text(
-                                          displayName,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w600,
-                                          ),
+                                        title: Row(
+                                          children: [
+                                            Flexible(
+                                              child: Text(
+                                                displayName,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 8),
+                                            if (keyChanged)
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.amber.withValues(alpha: 0.2),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                  border: Border.all(color: Colors.amberAccent),
+                                                ),
+                                                child: const Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    Icon(Icons.warning_amber_rounded, color: Colors.amberAccent, size: 12),
+                                                    SizedBox(width: 4),
+                                                    Text(
+                                                      'Key Changed',
+                                                      style: TextStyle(
+                                                        color: Colors.amberAccent,
+                                                        fontSize: 10,
+                                                        fontWeight: FontWeight.bold,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              )
+                                            else if (isVerified)
+                                              const Icon(Icons.verified, color: Colors.blueAccent, size: 16),
+                                          ],
                                         ),
                                         subtitle: Text(
                                           profile.username,
@@ -577,6 +713,33 @@ class _InboxScreenState extends State<InboxScreen> {
   }
 
   Widget _buildEmptyState() {
+    final clean = HashUtils.rawUsername(_searchQuery);
+    final String title;
+    final String subtitle;
+    final IconData icon;
+
+    if (_searchError != null) {
+      icon = Icons.wifi_off_rounded;
+      title = 'Search failed, check connection';
+      subtitle = 'Unable to reach the network directory. Please check your connection.';
+    } else if (_isSearchingRemote) {
+      icon = Icons.search;
+      title = 'Searching directory...';
+      subtitle = 'Looking up "$_searchQuery" across users.';
+    } else if (clean.length < 3 && _searchQuery.isNotEmpty) {
+      icon = Icons.text_fields_rounded;
+      title = 'Keep typing...';
+      subtitle = 'Type at least 3 characters to search network users.';
+    } else if (_searchQuery.isNotEmpty) {
+      icon = Icons.search_off;
+      title = 'No user found';
+      subtitle = 'No registered users found matching "$_searchQuery".';
+    } else {
+      icon = Icons.chat_bubble_outline;
+      title = 'Your inbox is clear';
+      subtitle = 'Tap the + button below to start a private conversation.';
+    }
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 32.0),
@@ -584,23 +747,19 @@ class _InboxScreenState extends State<InboxScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
-              _searchQuery.isNotEmpty ? Icons.search_off : Icons.chat_bubble_outline,
+              icon,
               color: Colors.white30,
               size: 48,
             ),
             const SizedBox(height: 16),
             Text(
-              _searchQuery.isNotEmpty
-                  ? 'No conversations matching "$_searchQuery"'
-                  : 'Your inbox is clear',
+              title,
               style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 6),
             Text(
-              _searchQuery.isNotEmpty
-                  ? 'Try searching with a different username or keyword.'
-                  : 'Tap the + button below to start a private conversation.',
+              subtitle,
               style: const TextStyle(color: Colors.white54, fontSize: 13),
               textAlign: TextAlign.center,
             ),

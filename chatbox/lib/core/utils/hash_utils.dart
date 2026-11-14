@@ -71,15 +71,14 @@ class HashUtils {
     return result == 0;
   }
 
-  /// Normalize a username into standard '@username' format (lowercase, trimmed)
-  static String normalizeUsername(String input) {
-    final clean = input.trim().replaceAll('@', '').toLowerCase();
-    return '@$clean';
+  /// Extract raw handle without leading '@', lowercase, whitespace stripped, restricted to [a-z0-9_]
+  static String rawUsername(String input) {
+    return input.trim().replaceAll('@', '').toLowerCase().replaceAll(RegExp(r'[^a-z0-9_]'), '');
   }
 
-  /// Extract raw handle without leading '@'
-  static String rawUsername(String input) {
-    return input.trim().replaceAll('@', '').toLowerCase();
+  /// Normalize a username into standard '@username' format (lowercase, trimmed, [a-z0-9_])
+  static String normalizeUsername(String input) {
+    return '@${rawUsername(input)}';
   }
 
   /// Validate username against privacy and format constraints:
@@ -89,15 +88,15 @@ class HashUtils {
     if (input == null || input.trim().isEmpty) {
       return 'Username is required';
     }
-    final raw = rawUsername(input);
-    if (raw.length < 3) {
+    final stripped = input.trim().replaceAll('@', '').toLowerCase();
+    if (stripped.length < 3) {
       return 'Username must be at least 3 characters';
     }
-    if (raw.length > 20) {
+    if (stripped.length > 20) {
       return 'Username cannot exceed 20 characters';
     }
-    final validCharacters = RegExp(r'^[a-zA-Z0-9_]+$');
-    if (!validCharacters.hasMatch(raw)) {
+    final validCharacters = RegExp(r'^[a-z0-9_]+$');
+    if (!validCharacters.hasMatch(stripped)) {
       return 'Only letters, numbers, and underscores are allowed';
     }
     return null;

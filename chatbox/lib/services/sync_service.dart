@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:chatbox/core/constants/app_constants.dart';
+import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/database/local_database.dart';
 import 'package:chatbox/models/encrypted_payload.dart';
 import 'package:chatbox/models/ephemeral_relay_envelope.dart';
 import 'package:chatbox/models/love_note.dart';
 import 'package:chatbox/models/media_attachment.dart';
 import 'package:chatbox/models/message.dart';
+import 'package:chatbox/repositories/conversation_repository.dart';
 import 'package:chatbox/services/chat_service.dart';
 import 'package:chatbox/services/conversation_sharing_service.dart';
 import 'package:chatbox/services/couple_features_service.dart';
@@ -15,9 +19,10 @@ import 'package:chatbox/services/media_encryption_service.dart';
 import 'package:chatbox/services/media_relay_service.dart';
 import 'package:chatbox/services/media_storage_service.dart';
 import 'package:chatbox/services/notification_service.dart';
-import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/services/user_directory_service.dart';
-import 'package:chatbox/repositories/conversation_repository.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart';
 
 /// Abstract service contract for message synchronization and offline queueing (Phase 12)
 abstract class SyncService {
@@ -77,6 +82,7 @@ class DefaultSyncService implements SyncService {
   final CoupleFeaturesService? _coupleFeaturesService;
 
   bool _isOnline = true;
+  final Map<String, int> _decryptFailures = {};
 
   DefaultSyncService({
     LocalDatabase? database,
@@ -108,28 +114,67 @@ class DefaultSyncService implements SyncService {
   MediaStorageService? get mediaStorageService => _mediaStorageService;
 
   StreamSubscription<List<EphemeralRelayEnvelope>>? _relaySubscription;
+  StreamSubscription<dynamic>? _inboxChildSubscription;
   String? _listeningUserId;
 
   @override
   void startRelayListener({required String currentUserId}) {
-    if (_listeningUserId == currentUserId && _relaySubscription != null) {
+    final normUserId = HashUtils.normalizeUsername(currentUserId);
+    if (_listeningUserId == normUserId && _relaySubscription != null) {
       return;
     }
     stopRelayListener();
-    _listeningUserId = currentUserId;
+    _listeningUserId = normUserId;
+    debugPrint('RELAY: listening on /relays/$normUserId');
+
+    // 1. Listen to /relays for backwards compatibility and test suites
     _relaySubscription = _chatService
-        .watchPendingRelayEnvelopes(currentUserId)
+        .watchPendingRelayEnvelopes(normUserId)
         .listen((envelopes) async {
+      debugPrint('RELAY: received ${envelopes.length} envelopes on /relays/$normUserId');
       if (envelopes.isNotEmpty) {
-        await processInboundEnvelopes(currentUserId: currentUserId);
+        await processInboundEnvelopes(currentUserId: normUserId);
       }
     });
+
+    // 2. High-concurrency onChildAdded listener on /inbox/{myUid}
+    _startInboxChildListener(normUserId);
+  }
+
+  void _startInboxChildListener(String normUserId) async {
+    _inboxChildSubscription?.cancel();
+    _inboxChildSubscription = null;
+
+    try {
+      if (Firebase.apps.isNotEmpty) {
+        String? uid = await DefaultUserDirectoryService().lookupUidByUsername(normUserId);
+        uid ??= FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null && uid.isNotEmpty) {
+          final rtdb = FirebaseDatabase.instanceFor(
+            app: Firebase.app(),
+            databaseURL: AppConstants.firebaseDatabaseUrl,
+          );
+          _inboxChildSubscription = rtdb.ref('inbox').child(uid).onChildAdded.listen((event) async {
+            if (event.snapshot.value is Map) {
+              final map = Map<String, dynamic>.from(event.snapshot.value as Map);
+              map['_pushId'] = event.snapshot.key;
+              final envelope = EphemeralRelayEnvelope.fromJson(map);
+              await _processSingleEnvelope(envelope, currentUserId: normUserId, rtdbRef: event.snapshot.ref);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('DefaultSyncService: _startInboxChildListener notice: $e');
+    }
   }
 
   @override
   void stopRelayListener() {
     _relaySubscription?.cancel();
     _relaySubscription = null;
+    _inboxChildSubscription?.cancel();
+    _inboxChildSubscription = null;
     _listeningUserId = null;
   }
 
@@ -174,10 +219,12 @@ class DefaultSyncService implements SyncService {
   Future<int> flushOutboundQueue({required String currentUserId}) async {
     if (!_isOnline) return 0;
 
-    final unsent = await _database.getUnsentMessages(currentUserId: currentUserId);
-    int flushedCount = 0;
+    final failedMessages = await _database.getUnsentMessages(
+      currentUserId: currentUserId,
+    );
 
-    for (final message in unsent) {
+    int flushedCount = 0;
+    for (final message in failedMessages) {
       final success = await _dispatchOutboundMessage(message);
       if (success) {
         flushedCount++;
@@ -222,6 +269,221 @@ class DefaultSyncService implements SyncService {
     }
   }
 
+  /// Process an individual incoming envelope cleanly, whether arriving via batch or onChildAdded
+  Future<ChatMessage?> _processSingleEnvelope(
+    EphemeralRelayEnvelope envelope, {
+    required String currentUserId,
+    DatabaseReference? rtdbRef,
+  }) async {
+    Future<void> ackEnvelope() async {
+      if (rtdbRef != null) {
+        try {
+          await rtdbRef.remove();
+        } catch (_) {}
+      }
+      await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
+    }
+
+    // 1. Control / signal envelopes handled FIRST
+    final loveConn = _loveConnectionService;
+    final convSharing = _conversationSharingService;
+    final coupleFeatures = _coupleFeaturesService;
+
+    if (envelope.isLoveConnectionSignal) {
+      if (loveConn != null) {
+        await loveConn.processInboundLoveEnvelope(
+          envelope,
+          currentUserId: currentUserId,
+          currentUsername: currentUserId,
+        );
+      }
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isLoveShareSignal) {
+      if (convSharing != null) {
+        await convSharing.handleInboundEnvelope(envelope);
+      }
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isLoveLuvSignal) {
+      if (coupleFeatures != null) {
+        coupleFeatures.emitLuvBurst(envelope.senderId);
+      }
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isReactionSignal) {
+      if (coupleFeatures != null) {
+        try {
+          final data = jsonDecode(envelope.ciphertextPayload) as Map<String, dynamic>;
+          await coupleFeatures.handleInboundReaction(
+            messageId: data['message_id'] as String,
+            senderUsername: data['sender_username'] as String? ?? envelope.senderId,
+            emoji: data['emoji'] as String,
+            isRemove: data['is_remove'] as bool? ?? false,
+          );
+        } catch (_) {}
+      }
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isLoveNoteSignal) {
+      if (coupleFeatures != null) {
+        try {
+          final data = jsonDecode(envelope.ciphertextPayload) as Map<String, dynamic>;
+          final note = LoveNote.fromJson(data);
+          await coupleFeatures.handleInboundLoveNote(note);
+        } catch (_) {}
+      }
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isTypingSignal) {
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isPresenceSignal) {
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isDeliveryReceipt) {
+      await _database.updateMessageStatusIfProgressing(
+        envelope.targetMessageId,
+        MessageStatus.delivered,
+      );
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isReadReceipt) {
+      await _database.updateMessageStatusIfProgressing(
+        envelope.targetMessageId,
+        MessageStatus.read,
+      );
+      await ackEnvelope();
+      return null;
+    } else if (envelope.isSignalEnvelope) {
+      await ackEnvelope();
+      return null;
+    }
+
+    // 2. Standard incoming message
+    final raw = ChatMessage(
+      id: envelope.id,
+      senderId: HashUtils.normalizeUsername(envelope.senderId),
+      recipientId: HashUtils.normalizeUsername(envelope.recipientId),
+      text: envelope.ciphertextPayload,
+      timestamp: envelope.timestamp,
+      status: MessageStatus.delivered,
+    );
+
+    ChatMessage decryptedMessage = raw;
+    final enc = _encryptionService;
+    bool decryptFailed = false;
+
+    if (enc != null) {
+      try {
+        final senderAccount = await _database.getAccountByUsername(raw.senderId);
+        String senderKey = senderAccount?.publicIdentityKey ?? '';
+        if (senderKey.isEmpty) {
+          senderKey = (await _resolveRecipientPublicKey(raw.senderId)) ?? '';
+        }
+        if (senderKey.isEmpty) {
+          try {
+            final ep = EncryptedPayload.deserialize(raw.text);
+            senderKey = ep.senderPublicKey;
+          } catch (_) {}
+        }
+        final cleartext = await enc.decryptPayload(raw.text, senderKey);
+        debugPrint('DECRYPT: messageId=${envelope.id}, status=success, sender=${raw.senderId}');
+        try {
+          final decoded = jsonDecode(cleartext);
+          if (decoded is Map<String, dynamic> && decoded.containsKey('mediaAttachment')) {
+            final mediaMap = decoded['mediaAttachment'] as Map<String, dynamic>;
+            var att = MediaAttachment.fromJson(mediaMap);
+            final text = decoded['text'] as String? ?? '';
+
+            final relay = _mediaRelayService;
+            final storage = _mediaStorageService;
+            if (att.remoteUrl != null && relay != null) {
+              try {
+                final blob = await relay.downloadEncryptedBlob(att.remoteUrl!);
+                if (storage != null) {
+                  final localPath = await storage.saveToSandbox(
+                    fileName: att.fileName,
+                    bytes: blob,
+                    type: att.type,
+                  );
+                  att = att.copyWith(localPath: localPath);
+                }
+                await relay.purgeEncryptedBlob(att.remoteUrl!);
+              } catch (_) {}
+            }
+
+            decryptedMessage = raw.copyWith(
+              text: text,
+              type: att.type,
+              mediaAttachment: att,
+            );
+          } else {
+            decryptedMessage = raw.copyWith(text: cleartext);
+          }
+        } catch (_) {
+          decryptedMessage = raw.copyWith(text: cleartext);
+        }
+      } catch (e) {
+        debugPrint('DECRYPT: messageId=${envelope.id}, status=failure, error=$e');
+        decryptFailed = true;
+      }
+    }
+
+    if (decryptFailed) {
+      final failures = (_decryptFailures[envelope.id] ?? 0) + 1;
+      _decryptFailures[envelope.id] = failures;
+      if (failures >= 3) {
+        // Quarantine after 3 failures on same message: save as undecryptable and ACK to unblock queue
+        final quarantined = raw.copyWith(
+          text: '[Undecryptable Message]',
+          type: MessageType.system,
+        );
+        await _database.saveMessage(quarantined);
+        await ackEnvelope();
+        if (AppConstants.enableDebugLogs) {
+          debugPrint('RECV: pushId=${envelope.id}, decrypted=false, ack=true (quarantined after 3 attempts)');
+        }
+        return quarantined;
+      }
+      return null;
+    }
+
+    _decryptFailures.remove(envelope.id);
+
+    // Persist cleartext locally (local device owns history)
+    await _database.saveMessage(decryptedMessage);
+    debugPrint('DB INSERT: messageId=${decryptedMessage.id}, status=saved_to_sqlite, sender=${decryptedMessage.senderId}');
+
+    // Notify user locally using privacy-preserving settings (zero leak)
+    await _notificationService?.showLocalAlert(
+      title: decryptedMessage.senderId,
+      body: decryptedMessage.mediaAttachment != null
+          ? (decryptedMessage.mediaAttachment!.isImage
+              ? '📷 Photo'
+              : decryptedMessage.mediaAttachment!.isAudio
+                  ? '🎙️ Voice note'
+                  : '🎥 Video')
+          : decryptedMessage.text,
+      conversationId: decryptedMessage.senderId,
+    );
+
+    // Atomic ACK: call .remove() ONLY AFTER local insert succeeds
+    await ackEnvelope();
+    if (AppConstants.enableDebugLogs) {
+      debugPrint('RECV: pushId=${envelope.id}, decrypted=true, ack=true');
+    }
+
+    // Dispatch ephemeral delivery receipt back to original sender
+    await sendDeliveryReceipt(
+      messageId: envelope.id,
+      recipientId: envelope.senderId,
+      senderId: currentUserId,
+    );
+
+    return decryptedMessage;
+  }
+
   @override
   Future<List<ChatMessage>> processInboundEnvelopes({required String currentUserId}) async {
     if (!_isOnline) return const [];
@@ -230,165 +492,9 @@ class DefaultSyncService implements SyncService {
     final processedMessages = <ChatMessage>[];
 
     for (final envelope in envelopes) {
-      if (envelope.isLoveConnectionSignal) {
-        if (_loveConnectionService != null) {
-          await _loveConnectionService.processInboundLoveEnvelope(
-            envelope,
-            currentUserId: currentUserId,
-            currentUsername: currentUserId,
-          );
-        }
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isLoveShareSignal) {
-        if (_conversationSharingService != null) {
-          await _conversationSharingService.handleInboundEnvelope(envelope);
-        }
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isLoveLuvSignal) {
-        if (_coupleFeaturesService != null) {
-          _coupleFeaturesService.emitLuvBurst(envelope.senderId);
-        }
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isReactionSignal) {
-        if (_coupleFeaturesService != null) {
-          try {
-            final data = jsonDecode(envelope.ciphertextPayload) as Map<String, dynamic>;
-            await _coupleFeaturesService.handleInboundReaction(
-              messageId: data['message_id'] as String,
-              senderUsername: data['sender_username'] as String? ?? envelope.senderId,
-              emoji: data['emoji'] as String,
-              isRemove: data['is_remove'] as bool? ?? false,
-            );
-          } catch (_) {}
-        }
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isLoveNoteSignal) {
-        if (_coupleFeaturesService != null) {
-          try {
-            final data = jsonDecode(envelope.ciphertextPayload) as Map<String, dynamic>;
-            final note = LoveNote.fromJson(data);
-            await _coupleFeaturesService.handleInboundLoveNote(note);
-          } catch (_) {}
-        }
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isTypingSignal) {
-        // Ephemeral typing indicator: volatile signal handled by RealtimeService; purge from cloud
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isPresenceSignal) {
-        // Ephemeral presence heartbeat: volatile signal handled by RealtimeService; purge from cloud
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isDeliveryReceipt) {
-        // Handle delivery receipt
-        await _database.updateMessageStatusIfProgressing(
-          envelope.targetMessageId,
-          MessageStatus.delivered,
-        );
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isReadReceipt) {
-        // Handle read receipt
-        await _database.updateMessageStatusIfProgressing(
-          envelope.targetMessageId,
-          MessageStatus.read,
-        );
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else if (envelope.isSignalEnvelope) {
-        // Ephemeral signal or control envelope: purge and discard to prevent ghost messages
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-      } else {
-        // Standard incoming message
-        final raw = ChatMessage(
-          id: envelope.id,
-          senderId: envelope.senderId,
-          recipientId: envelope.recipientId,
-          text: envelope.ciphertextPayload,
-          timestamp: envelope.timestamp,
-          status: MessageStatus.delivered,
-        );
-
-        ChatMessage decryptedMessage = raw;
-        final enc = _encryptionService;
-        if (enc != null) {
-          try {
-            final senderAccount =
-                await _database.getAccountByUsername(raw.senderId);
-            String senderKey = senderAccount?.publicIdentityKey ?? '';
-            if (senderKey.isEmpty) {
-              senderKey = (await _resolveRecipientPublicKey(raw.senderId)) ?? '';
-            }
-            if (senderKey.isEmpty) {
-              try {
-                final ep = EncryptedPayload.deserialize(raw.text);
-                senderKey = ep.senderPublicKey;
-              } catch (_) {}
-            }
-            final cleartext = await enc.decryptPayload(raw.text, senderKey);
-            try {
-              final decoded = jsonDecode(cleartext);
-              if (decoded is Map<String, dynamic> && decoded.containsKey('mediaAttachment')) {
-                final mediaMap = decoded['mediaAttachment'] as Map<String, dynamic>;
-                var att = MediaAttachment.fromJson(mediaMap);
-                final text = decoded['text'] as String? ?? '';
-
-                // If media blob is in relay, download and purge from cloud
-                final relay = _mediaRelayService;
-                final storage = _mediaStorageService;
-                if (att.remoteUrl != null && relay != null) {
-                  try {
-                    final blob = await relay.downloadEncryptedBlob(att.remoteUrl!);
-                    if (storage != null) {
-                      final localPath = await storage.saveToSandbox(
-                        fileName: att.fileName,
-                        bytes: blob,
-                        type: att.type,
-                      );
-                      att = att.copyWith(localPath: localPath);
-                    }
-                    await relay.purgeEncryptedBlob(att.remoteUrl!);
-                  } catch (_) {}
-                }
-
-                decryptedMessage = raw.copyWith(
-                  text: text,
-                  type: att.type,
-                  mediaAttachment: att,
-                );
-              } else {
-                decryptedMessage = raw.copyWith(text: cleartext);
-              }
-            } catch (_) {
-              decryptedMessage = raw.copyWith(text: cleartext);
-            }
-          } catch (_) {
-            // Decryption fallback
-          }
-        }
-
-        // Persist cleartext locally (local device owns history)
-        await _database.saveMessage(decryptedMessage);
-        processedMessages.add(decryptedMessage);
-
-        // Notify user locally using privacy-preserving settings (zero leak)
-        await _notificationService?.showLocalAlert(
-          title: decryptedMessage.senderId,
-          body: decryptedMessage.mediaAttachment != null
-              ? (decryptedMessage.mediaAttachment!.isImage
-                  ? '📷 Photo'
-                  : decryptedMessage.mediaAttachment!.isAudio
-                      ? '🎙️ Voice note'
-                      : '🎥 Video')
-              : decryptedMessage.text,
-          conversationId: decryptedMessage.senderId,
-        );
-
-        // Acknowledge and purge ciphertext from remote relay
-        await _chatService.acknowledgeAndPurge(envelope.id, recipientId: currentUserId);
-
-        // Dispatch ephemeral delivery receipt back to original sender
-        await sendDeliveryReceipt(
-          messageId: envelope.id,
-          recipientId: envelope.senderId,
-          senderId: currentUserId,
-        );
+      final msg = await _processSingleEnvelope(envelope, currentUserId: currentUserId);
+      if (msg != null) {
+        processedMessages.add(msg);
       }
     }
 

@@ -32,7 +32,7 @@ class DirectoryProfile {
       };
 
   factory DirectoryProfile.fromJson(Map<String, dynamic> json) => DirectoryProfile(
-        accountId: json['accountId'] as String? ?? '',
+        accountId: json['accountId'] as String? ?? json['uid'] as String? ?? '',
         username: json['username'] as String? ?? '',
         publicIdentityKey: json['publicIdentityKey'] as String? ?? '',
         fcmToken: json['fcmToken'] as String?,
@@ -64,8 +64,11 @@ abstract class UserDirectoryService {
   /// Look up user's public identity and public key by normalized username
   Future<DirectoryProfile?> lookupProfile(String username);
 
-  /// Search users across the directory by query (prefix and partial match)
+  /// Search users across the directory by query (prefix match)
   Future<List<DirectoryProfile>> searchUsers(String query);
+
+  /// Look up Firebase Auth UID directly from claimed username mapping
+  Future<String?> lookupUidByUsername(String username);
 
   /// Update FCM registration token for background push delivery
   Future<void> updateFcmToken({
@@ -77,36 +80,78 @@ abstract class UserDirectoryService {
   Future<void> updateLastSeen(String username);
 }
 
+/// In-memory cache entry for user prefix search results (TTL 60 seconds)
+class _SearchCacheEntry {
+  final List<DirectoryProfile> results;
+  final DateTime timestamp;
+
+  _SearchCacheEntry(this.results, this.timestamp);
+
+  bool get isExpired =>
+      DateTime.now().difference(timestamp) > const Duration(seconds: 60);
+}
+
+/// In-memory cache entry for individual user profiles (TTL 60 seconds)
+class _ProfileCacheEntry {
+  final DirectoryProfile profile;
+  final DateTime timestamp;
+
+  _ProfileCacheEntry(this.profile, this.timestamp);
+
+  bool get isExpired =>
+      DateTime.now().difference(timestamp) > const Duration(seconds: 60);
+}
+
 /// In-memory mock implementation for testing and isolated offline execution
 class InMemoryUserDirectoryService implements UserDirectoryService {
   final Map<String, DirectoryProfile> _directory = {};
+  final Map<String, String> _uidMappings = {};
 
   InMemoryUserDirectoryService([Map<String, DirectoryProfile>? initial]) {
     if (initial != null) {
-      _directory.addAll(initial);
+      for (final profile in initial.values) {
+        publishProfile(profile);
+      }
     }
   }
 
   @override
   Future<void> publishProfile(DirectoryProfile profile) async {
-    final key = HashUtils.normalizeUsername(profile.username);
-    _directory[key] = profile;
+    final normalized = HashUtils.normalizeUsername(profile.username);
+    final raw = HashUtils.rawUsername(profile.username);
+    _directory[normalized] = profile;
+    _directory[raw] = profile;
+    _uidMappings[raw] = profile.accountId;
+    _uidMappings[normalized] = profile.accountId;
   }
 
   @override
   Future<DirectoryProfile?> lookupProfile(String username) async {
-    final key = HashUtils.normalizeUsername(username);
-    return _directory[key];
+    final raw = HashUtils.rawUsername(username);
+    final normalized = HashUtils.normalizeUsername(username);
+    return _directory[normalized] ?? _directory[raw];
   }
 
   @override
   Future<List<DirectoryProfile>> searchUsers(String query) async {
-    final clean = query.trim().replaceAll('@', '').toLowerCase();
-    if (clean.isEmpty) return [];
-    return _directory.values.where((p) {
-      final u = HashUtils.rawUsername(p.username);
-      return u.contains(clean) || p.accountId.contains(clean);
-    }).toList();
+    final clean = HashUtils.rawUsername(query);
+    if (clean.length < 3) return [];
+
+    final matches = <String, DirectoryProfile>{};
+    for (final p in _directory.values) {
+      final handle = HashUtils.rawUsername(p.username);
+      if (handle.startsWith(clean)) {
+        matches[handle] = p;
+      }
+    }
+    return matches.values.take(20).toList();
+  }
+
+  @override
+  Future<String?> lookupUidByUsername(String username) async {
+    final raw = HashUtils.rawUsername(username);
+    final normalized = HashUtils.normalizeUsername(username);
+    return _uidMappings[raw] ?? _uidMappings[normalized] ?? _directory[normalized]?.accountId;
   }
 
   @override
@@ -114,27 +159,40 @@ class InMemoryUserDirectoryService implements UserDirectoryService {
     required String username,
     required String fcmToken,
   }) async {
-    final key = HashUtils.normalizeUsername(username);
-    final existing = _directory[key];
+    final normalized = HashUtils.normalizeUsername(username);
+    final raw = HashUtils.rawUsername(username);
+    final existing = _directory[normalized] ?? _directory[raw];
     if (existing != null) {
-      _directory[key] = existing.copyWith(fcmToken: fcmToken);
+      final updated = existing.copyWith(fcmToken: fcmToken);
+      _directory[normalized] = updated;
+      _directory[raw] = updated;
     }
   }
 
   @override
   Future<void> updateLastSeen(String username) async {
-    final key = HashUtils.normalizeUsername(username);
-    final existing = _directory[key];
+    final normalized = HashUtils.normalizeUsername(username);
+    final raw = HashUtils.rawUsername(username);
+    final existing = _directory[normalized] ?? _directory[raw];
     if (existing != null) {
-      _directory[key] = existing.copyWith(lastSeen: DateTime.now());
+      final updated = existing.copyWith(lastSeen: DateTime.now());
+      _directory[normalized] = updated;
+      _directory[raw] = updated;
     }
   }
 }
 
-/// Production implementation backed by Firebase Realtime Database
+/// Production implementation backed by Firebase Realtime Database with high-concurrency indexing
 class FirebaseUserDirectoryService implements UserDirectoryService {
   final FirebaseDatabase _database;
   final FirebaseAuth _auth;
+
+  // In-memory caching for prefix queries and profiles (TTL 60s, max 100 entries)
+  final Map<String, _SearchCacheEntry> _searchCache = {};
+  final Map<String, _ProfileCacheEntry> _profileCache = {};
+  final Map<String, String> _uidCache = {};
+
+  static const int _maxCacheEntries = 100;
 
   FirebaseUserDirectoryService({
     FirebaseDatabase? database,
@@ -171,6 +229,15 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
     }
   }
 
+  void _trimCache<K, V>(Map<K, V> cache) {
+    if (cache.length > _maxCacheEntries) {
+      final keysToRemove = cache.keys.take(cache.length - _maxCacheEntries).toList();
+      for (final key in keysToRemove) {
+        cache.remove(key);
+      }
+    }
+  }
+
   String _sanitizeKey(String username) {
     return HashUtils.normalizeUsername(username).replaceAll(RegExp(r'[^a-zA-Z0-9_@]'), '_');
   }
@@ -185,13 +252,30 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
     try {
       await _ensureAuth();
       final currentUid = _auth.currentUser?.uid;
-      // Align accountId with Firebase Auth UID to satisfy RTDB security rule:
-      // newData.child('accountId').val() == auth.uid
-      final effectiveProfile = (currentUid != null && currentUid.isNotEmpty && profile.accountId != currentUid)
-          ? profile.copyWith(accountId: currentUid)
-          : profile;
+      final rawHandle = HashUtils.rawUsername(profile.username);
+      final normalized = HashUtils.normalizeUsername(profile.username);
 
+      final effectiveProfile = (currentUid != null && currentUid.isNotEmpty && profile.accountId != currentUid)
+          ? profile.copyWith(accountId: currentUid, username: normalized)
+          : profile.copyWith(username: normalized);
+
+      // 1. Write to /users/{uid}/profile
+      if (effectiveProfile.accountId.isNotEmpty) {
+        await _database.ref('users').child(effectiveProfile.accountId).child('profile').set({
+          'username': normalized,
+          'publicIdentityKey': effectiveProfile.publicIdentityKey,
+          'createdAt': ServerValue.timestamp,
+        });
+      }
+
+      // 2. Write to /directory/{normalized} for backward compatibility
       await _dirRef(effectiveProfile.username).set(effectiveProfile.toJson());
+
+      // Update in-memory caches
+      _profileCache[rawHandle] = _ProfileCacheEntry(effectiveProfile, DateTime.now());
+      _profileCache[normalized] = _ProfileCacheEntry(effectiveProfile, DateTime.now());
+      _uidCache[rawHandle] = effectiveProfile.accountId;
+
       debugPrint('FirebaseUserDirectoryService: Successfully published profile for ${effectiveProfile.username} (UID: ${effectiveProfile.accountId})');
     } catch (e) {
       debugPrint('FirebaseUserDirectoryService: publishProfile error: $e');
@@ -201,16 +285,51 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
 
   @override
   Future<DirectoryProfile?> lookupProfile(String username) async {
+    final raw = HashUtils.rawUsername(username);
+    final normalized = HashUtils.normalizeUsername(username);
+    if (raw.isEmpty) return null;
+
+    // Check profile cache
+    final cached = _profileCache[raw] ?? _profileCache[normalized];
+    if (cached != null && !cached.isExpired) {
+      return cached.profile;
+    }
+
     try {
       await _ensureAuth();
+
+      // 1. Resolve UID via /usernames/{raw}
+      String? uid = await lookupUidByUsername(raw);
+
+      if (uid != null && uid.isNotEmpty) {
+        final profileSnap = await _database.ref('users').child(uid).child('profile').get();
+        if (profileSnap.exists && profileSnap.value is Map) {
+          final map = Map<String, dynamic>.from(profileSnap.value as Map);
+          final profile = DirectoryProfile(
+            accountId: uid,
+            username: map['username'] as String? ?? normalized,
+            publicIdentityKey: map['publicIdentityKey'] as String? ?? '',
+            lastSeen: DateTime.now(),
+          );
+          _profileCache[raw] = _ProfileCacheEntry(profile, DateTime.now());
+          _profileCache[normalized] = _ProfileCacheEntry(profile, DateTime.now());
+          _trimCache(_profileCache);
+          return profile;
+        }
+      }
+
+      // 2. Fallback: check legacy /directory node
       final snapshot = await _dirRef(username).get();
-      if (!snapshot.exists || snapshot.value == null) {
-        return null;
+      if (snapshot.exists && snapshot.value is Map) {
+        final profile = DirectoryProfile.fromJson(
+          Map<String, dynamic>.from(snapshot.value as Map),
+        );
+        _profileCache[raw] = _ProfileCacheEntry(profile, DateTime.now());
+        _profileCache[normalized] = _ProfileCacheEntry(profile, DateTime.now());
+        _trimCache(_profileCache);
+        return profile;
       }
-      final raw = snapshot.value;
-      if (raw is Map) {
-        return DirectoryProfile.fromJson(Map<String, dynamic>.from(raw));
-      }
+
       return null;
     } catch (e) {
       debugPrint('FirebaseUserDirectoryService: lookupProfile error: $e');
@@ -220,69 +339,158 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
 
   @override
   Future<List<DirectoryProfile>> searchUsers(String query) async {
-    final clean = query.trim().replaceAll('@', '').toLowerCase();
-    if (clean.isEmpty) return [];
+    final clean = HashUtils.rawUsername(query);
+    // Requirement 2: Require minimum 3 characters before querying Firebase
+    if (clean.length < 3) return [];
+
+    final stopwatch = Stopwatch()..start();
+
+    // Requirement 5: In-memory cache for prefix results (TTL 60s, max 100 entries)
+    final cached = _searchCache[clean];
+    if (cached != null && !cached.isExpired) {
+      if (AppConstants.enableDebugLogs) {
+        debugPrint(
+          'SEARCH: prefix=$clean, count=${cached.results.length}, latency=${stopwatch.elapsedMilliseconds}ms (cached)',
+        );
+      }
+      return cached.results;
+    }
 
     try {
       await _ensureAuth();
       final results = <String, DirectoryProfile>{};
 
-      // 1. Direct exact lookup with @
-      final exactKey = '@$clean';
-      final exactProfile = await lookupProfile(exactKey);
-      if (exactProfile != null) {
-        results[exactProfile.username] = exactProfile;
-      }
-
-      // 2. Query prefix with '@' (Firebase RTDB ordered by key)
-      final prefixSnapshot = await _database
-          .ref('directory')
+      // Requirement 1: Prefix search on /usernames using:
+      // startAt(clean).endAt(clean + '\uf8ff').limitToFirst(20)
+      final usernamesSnapshot = await _database
+          .ref('usernames')
           .orderByKey()
-          .startAt(exactKey)
-          .endAt('$exactKey\uf8ff')
-          .limitToFirst(25)
+          .startAt(clean)
+          .endAt('$clean\uf8ff')
+          .limitToFirst(20)
           .get();
 
-      if (prefixSnapshot.exists && prefixSnapshot.value is Map) {
-        final rawMap = Map<dynamic, dynamic>.from(prefixSnapshot.value as Map);
+      if (usernamesSnapshot.exists && usernamesSnapshot.value is Map) {
+        final rawMap = Map<dynamic, dynamic>.from(usernamesSnapshot.value as Map);
+        final profileLookups = <Future<DirectoryProfile?>>[];
+
         for (final entry in rawMap.entries) {
-          if (entry.value is Map) {
-            final profile = DirectoryProfile.fromJson(
-              Map<String, dynamic>.from(entry.value as Map),
+          final handle = entry.key.toString();
+          final uid = entry.value.toString();
+          _uidCache[handle] = uid;
+
+          // Check if profile is already cached
+          final cachedProfile = _profileCache[handle];
+          if (cachedProfile != null && !cachedProfile.isExpired) {
+            results[handle] = cachedProfile.profile;
+          } else {
+            profileLookups.add(
+              _database.ref('users').child(uid).child('profile').get().then((snap) {
+                if (snap.exists && snap.value is Map) {
+                  final map = Map<String, dynamic>.from(snap.value as Map);
+                  final prof = DirectoryProfile(
+                    accountId: uid,
+                    username: map['username'] as String? ?? '@$handle',
+                    publicIdentityKey: map['publicIdentityKey'] as String? ?? '',
+                    lastSeen: DateTime.now(),
+                  );
+                  _profileCache[handle] = _ProfileCacheEntry(prof, DateTime.now());
+                  return prof;
+                }
+                return null;
+              }).catchError((_) => null),
             );
-            results[profile.username] = profile;
           }
         }
-      }
 
-      // 3. Fallback: Query prefix without '@' in case stored under raw handles
-      if (results.isEmpty) {
-        final rawSnapshot = await _database
-            .ref('directory')
-            .orderByKey()
-            .startAt(clean)
-            .endAt('$clean\uf8ff')
-            .limitToFirst(25)
-            .get();
-
-        if (rawSnapshot.exists && rawSnapshot.value is Map) {
-          final rawMap = Map<dynamic, dynamic>.from(rawSnapshot.value as Map);
-          for (final entry in rawMap.entries) {
-            if (entry.value is Map) {
-              final profile = DirectoryProfile.fromJson(
-                Map<String, dynamic>.from(entry.value as Map),
-              );
-              results[profile.username] = profile;
+        if (profileLookups.isNotEmpty) {
+          final fetched = await Future.wait(profileLookups);
+          for (final prof in fetched) {
+            if (prof != null) {
+              results[HashUtils.rawUsername(prof.username)] = prof;
             }
           }
         }
       }
 
-      return results.values.toList();
+      // Fallback: If /usernames returned 0 results, check /directory for backward compatibility
+      if (results.isEmpty) {
+        final exactKey = '@$clean';
+        final prefixSnapshot = await _database
+            .ref('directory')
+            .orderByKey()
+            .startAt(exactKey)
+            .endAt('$exactKey\uf8ff')
+            .limitToFirst(20)
+            .get();
+
+        if (prefixSnapshot.exists && prefixSnapshot.value is Map) {
+          final rawMap = Map<dynamic, dynamic>.from(prefixSnapshot.value as Map);
+          for (final entry in rawMap.entries) {
+            if (entry.value is Map) {
+              final profile = DirectoryProfile.fromJson(
+                Map<String, dynamic>.from(entry.value as Map),
+              );
+              results[HashUtils.rawUsername(profile.username)] = profile;
+            }
+          }
+        }
+      }
+
+      final resultList = results.values.take(20).toList();
+
+      // Cache the result
+      _searchCache[clean] = _SearchCacheEntry(resultList, DateTime.now());
+      _trimCache(_searchCache);
+      _trimCache(_profileCache);
+
+      stopwatch.stop();
+      if (AppConstants.enableDebugLogs) {
+        debugPrint(
+          'SEARCH: prefix=$clean, count=${resultList.length}, latency=${stopwatch.elapsedMilliseconds}ms',
+        );
+      }
+
+      return resultList;
     } catch (e) {
       debugPrint('FirebaseUserDirectoryService: searchUsers error: $e');
-      return [];
+      rethrow;
     }
+  }
+
+  @override
+  Future<String?> lookupUidByUsername(String username) async {
+    final clean = HashUtils.rawUsername(username);
+    if (clean.isEmpty) return null;
+
+    final cached = _uidCache[clean];
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
+    }
+
+    try {
+      await _ensureAuth();
+      final snap = await _database.ref('usernames').child(clean).get();
+      if (snap.exists && snap.value != null) {
+        final uid = snap.value.toString();
+        _uidCache[clean] = uid;
+        return uid;
+      }
+
+      // Fallback: check /directory/@clean
+      final dirSnap = await _dirRef(username).get();
+      if (dirSnap.exists && dirSnap.value is Map) {
+        final map = Map<String, dynamic>.from(dirSnap.value as Map);
+        final uid = map['accountId'] as String?;
+        if (uid != null && uid.isNotEmpty) {
+          _uidCache[clean] = uid;
+          return uid;
+        }
+      }
+    } catch (e) {
+      debugPrint('FirebaseUserDirectoryService: lookupUidByUsername error: $e');
+    }
+    return null;
   }
 
   @override
@@ -292,6 +500,10 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
   }) async {
     try {
       await _ensureAuth();
+      final uid = await lookupUidByUsername(username) ?? _auth.currentUser?.uid;
+      if (uid != null && uid.isNotEmpty) {
+        await _database.ref('users').child(uid).child('private').child('fcm').set(fcmToken);
+      }
       await _dirRef(username).update({
         'fcmToken': fcmToken,
         'lastSeen': DateTime.now().toUtc().toIso8601String(),
@@ -305,6 +517,13 @@ class FirebaseUserDirectoryService implements UserDirectoryService {
   Future<void> updateLastSeen(String username) async {
     try {
       await _ensureAuth();
+      final uid = await lookupUidByUsername(username) ?? _auth.currentUser?.uid;
+      if (uid != null && uid.isNotEmpty) {
+        await _database.ref('presence').child(uid).update({
+          'online': true,
+          'lastSeen': ServerValue.timestamp,
+        });
+      }
       await _dirRef(username).update({
         'lastSeen': DateTime.now().toUtc().toIso8601String(),
       });
@@ -346,6 +565,9 @@ class DefaultUserDirectoryService implements UserDirectoryService {
 
   @override
   Future<List<DirectoryProfile>> searchUsers(String query) => delegate.searchUsers(query);
+
+  @override
+  Future<String?> lookupUidByUsername(String username) => delegate.lookupUidByUsername(username);
 
   @override
   Future<void> updateFcmToken({required String username, required String fcmToken}) =>

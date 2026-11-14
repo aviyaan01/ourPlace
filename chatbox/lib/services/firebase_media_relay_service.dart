@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:chatbox/services/media_relay_service.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// Live production implementation of [MediaRelayService] backed by Firebase Storage.
 ///
@@ -62,11 +64,23 @@ class FirebaseMediaRelayService implements MediaRelayService {
   Future<Uint8List> downloadEncryptedBlob(String blobIdOrUrl) async {
     try {
       final ref = _getRef(blobIdOrUrl);
-      final data = await ref.getData(100 * 1024 * 1024); // max 100MB
-      if (data == null) {
-        throw Exception('Encrypted media blob not found or already purged: $blobIdOrUrl');
+      final tempDir = await getTemporaryDirectory();
+      final sanitizedName = _cleanBlobId(blobIdOrUrl).replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+      final tempFile = File('${tempDir.path}/nest_media_${DateTime.now().millisecondsSinceEpoch}_$sanitizedName.bin');
+
+      final downloadTask = ref.writeToFile(tempFile);
+      await downloadTask;
+
+      if (!await tempFile.exists()) {
+        throw Exception('Encrypted media blob download target file missing: $blobIdOrUrl');
       }
-      return data;
+
+      final bytes = await tempFile.readAsBytes();
+      try {
+        await tempFile.delete();
+      } catch (_) {}
+
+      return bytes;
     } catch (e) {
       debugPrint('FirebaseMediaRelayService: downloadEncryptedBlob error: $e');
       rethrow;

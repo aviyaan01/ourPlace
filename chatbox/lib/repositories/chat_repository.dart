@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/errors/app_exception.dart';
 import 'package:chatbox/database/local_database.dart';
@@ -293,13 +294,20 @@ class LocalChatRepository implements ChatRepository {
 
   @override
   Future<void> sendMessage(ChatMessage message) async {
-    if (message.senderId.isNotEmpty && message.senderId != AppConstants.currentUserId) {
-      _activeUserId ??= message.senderId;
-      _database.activeUsername ??= message.senderId;
-    }
+    final normSender = HashUtils.normalizeUsername(message.senderId);
+    final normRecipient = HashUtils.normalizeUsername(message.recipientId);
+    final normalized = message.copyWith(
+      senderId: normSender,
+      recipientId: normRecipient,
+    );
+
+    _activeUserId = normSender;
+    _database.activeUsername = normSender;
+
     // 1. Immediately persist locally in cleartext with initial 'sending' state
-    final initial = message.copyWithStatus(MessageStatus.sending);
+    final initial = normalized.copyWithStatus(MessageStatus.sending);
     await _database.saveMessage(initial);
+    debugPrint('DB INSERT: messageId=${initial.id}, status=${initial.status.name}, sender=$normSender, recipient=$normRecipient');
 
     // 2. Encrypt plaintext for transport via Phase 10 E2EE
     ChatMessage outboundMessage = initial;
@@ -308,10 +316,12 @@ class LocalChatRepository implements ChatRepository {
       final recipientKey = await resolveRecipientPublicKey(initial.recipientId);
       if (recipientKey == null || recipientKey.isEmpty) {
         await _database.updateMessageStatus(message.id, MessageStatus.failed);
+        debugPrint('ENCRYPT: Failed to resolve recipient public key for ${initial.recipientId}');
         throw SecurityException(
-          'Cannot send message: Recipient public identity key is missing for ${initial.recipientId}. Complete key exchange before transmitting.',
+          'Cannot send message: Recipient public identity key is missing for ${initial.recipientId}. Complete key exchange or check user directory before transmitting.',
         );
       }
+      debugPrint('ENCRYPT: Resolved recipientKey=$recipientKey for ${initial.recipientId}');
       final String payload;
       if (initial.mediaAttachment != null) {
         payload = jsonEncode({
@@ -329,20 +339,26 @@ class LocalChatRepository implements ChatRepository {
     }
 
     // 3. Dispatch to temporary relay (Phase 11 Ephemeral Queue)
+    final targetPath = '/relays/$normRecipient/${outboundMessage.id}';
     try {
       if (!_syncService.isOnline) {
-        throw Exception('Device is offline');
+        debugPrint('SEND: path=$targetPath, offline queueing, marked failed for retry');
+        await _database.updateMessageStatus(message.id, MessageStatus.failed);
+        return;
       }
+      debugPrint('SEND: Attempting push to $targetPath');
       await _chatService.sendMessage(outboundMessage);
+      debugPrint('SEND: path=$targetPath, success, messageId=${outboundMessage.id}');
       // 4. Update local state to sent
       await _database.updateMessageStatusIfProgressing(message.id, MessageStatus.sent);
-    } catch (_) {
-      // 5. If dispatch fails or offline, update to failed for offline retry
+    } catch (e) {
+      debugPrint('SEND: path=$targetPath, failure, error=$e');
       await _database.updateMessageStatus(message.id, MessageStatus.failed);
+      rethrow;
     } finally {
       try {
         LocalConversationRepository.instance
-            .refreshConversations(currentUserId: message.senderId);
+            .refreshConversations(currentUserId: normSender);
       } catch (_) {}
     }
   }

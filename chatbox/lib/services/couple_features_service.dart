@@ -174,7 +174,10 @@ class DefaultCoupleFeaturesService implements CoupleFeaturesService {
         : partnerUsername;
 
     // Retrieve existing message to check previous reaction
-    final messages = await _localDatabase.getMessagesForPartner(cleanPartner);
+    final messages = await _localDatabase.getMessagesForPartner(
+      cleanPartner,
+      currentUserId: cleanCurrent,
+    );
     final msgIndex = messages.indexWhere((m) => m.id == messageId);
     if (msgIndex == -1) return;
 
@@ -215,7 +218,10 @@ class DefaultCoupleFeaturesService implements CoupleFeaturesService {
     final cleanPartner = senderUsername.startsWith('@')
         ? senderUsername.substring(1)
         : senderUsername;
-    final messages = await _localDatabase.getMessagesForPartner(cleanPartner);
+    final messages = await _localDatabase.getMessagesForPartner(
+      cleanPartner,
+      currentUserId: _localDatabase.activeUsername ?? cleanSender,
+    );
     final msgIndex = messages.indexWhere((m) => m.id == messageId);
     if (msgIndex == -1) return;
 

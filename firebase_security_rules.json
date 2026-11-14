@@ -1,11 +1,62 @@
 {
   "rules": {
+    "usernames": {
+      ".read": "auth != null",
+      ".indexOn": [".value"],
+      "$username": {
+        ".write": "auth != null && !data.exists() && newData.val() == auth.uid",
+        ".validate": "newData.isString() && newData.val() == auth.uid && $username.length >= 3 && $username.length <= 20"
+      }
+    },
+    "users": {
+      "$uid": {
+        "profile": {
+          ".read": "auth != null",
+          ".write": "auth != null && auth.uid == $uid",
+          ".validate": "newData.hasChildren(['username', 'publicIdentityKey', 'createdAt']) && newData.child('username').isString() && newData.child('publicIdentityKey').isString()"
+        },
+        "private": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && auth.uid == $uid",
+          "fcm": {
+            ".validate": "newData.isString() && newData.val().length <= 4096"
+          }
+        }
+      }
+    },
+    "inbox": {
+      ".read": false,
+      "$uid": {
+        ".read": false,
+        "$pushId": {
+          ".read": "auth != null && auth.uid == $uid",
+          ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('senderUid').val() == auth.uid && newData.child('ciphertext').val().length <= 65536 && newData.child('expiresAt').val() <= (now + 172800000)) || (!newData.exists() && data.exists() && auth.uid == $uid))",
+          ".validate": "newData.hasChildren(['id', 'senderUid', 'senderUsername', 'ciphertext', 'type', 'timestamp', 'expiresAt']) && newData.child('id').isString() && newData.child('senderUid').isString() && newData.child('senderUsername').isString() && newData.child('ciphertext').isString() && newData.child('type').isString()"
+        }
+      }
+    },
+    "presence": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid == $uid",
+        ".validate": "newData.hasChildren(['online', 'lastSeen']) && newData.child('online').isBoolean()"
+      }
+    },
+    "typing": {
+      "$chatId": {
+        ".read": "auth != null",
+        "$uid": {
+          ".write": "auth != null && auth.uid == $uid",
+          ".validate": "newData.isBoolean()"
+        }
+      }
+    },
     "relays": {
       "$recipientId": {
         ".read": "auth != null && (auth.uid == $recipientId || root.child('directory').child($recipientId).child('accountId').val() == auth.uid)",
         "$messageId": {
-          ".write": "auth != null && ((!newData.exists() && (auth.uid == $recipientId || root.child('directory').child($recipientId).child('accountId').val() == auth.uid)) || (newData.exists() && (newData.child('sender_id').val() == auth.uid || root.child('directory').child(newData.child('sender_id').val()).child('accountId').val() == auth.uid)))",
-          ".validate": "newData.hasChildren(['id', 'sender_id', 'recipient_id', 'ciphertext', 'timestamp', 'expires_at']) && (newData.child('recipient_id').val() == $recipientId || root.child('directory').child(newData.child('recipient_id').val()).child('accountId').val() == $recipientId || newData.child('recipient_id').val() == root.child('directory').child($recipientId).child('username').val())"
+          ".write": "auth != null && (newData.exists() || auth.uid == $recipientId || root.child('directory').child($recipientId).child('accountId').val() == auth.uid)",
+          ".validate": "newData.hasChildren(['id', 'sender_id', 'recipient_id', 'ciphertext', 'timestamp', 'expires_at'])"
         }
       }
     },
@@ -18,4 +69,3 @@
     }
   }
 }
-

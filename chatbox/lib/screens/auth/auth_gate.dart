@@ -148,6 +148,9 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         if (user?.id != _lastUserId) {
           _lastUserId = user?.id;
           if (user != null) {
+            final activeUser = user.username.isNotEmpty ? user.username : user.id;
+            _chatRepository.startRelayListener(activeUser);
+            _chatRepository.syncService.reconcile(currentUserId: activeUser);
             WidgetsBinding.instance.addPostFrameCallback((_) {
               if (mounted) _refreshPasscodeStatus();
             });

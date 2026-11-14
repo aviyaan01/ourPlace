@@ -140,25 +140,39 @@ class LocalDatabase {
         ? currentUserId
         : (activeUsername ?? currentUserId);
 
-    final cleanPartner = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
+    final cleanPartner = partnerId.replaceAll('@', '');
+    final lowerPartner = cleanPartner.toLowerCase();
     final atPartner = '@$cleanPartner';
+    final atLowerPartner = '@$lowerPartner';
 
-    final cleanCurrent = effectiveCurrent.startsWith('@')
-        ? effectiveCurrent.substring(1)
-        : effectiveCurrent;
+    final cleanCurrent = effectiveCurrent.replaceAll('@', '');
+    final lowerCurrent = cleanCurrent.toLowerCase();
     final atCurrent = '@$cleanCurrent';
+    final atLowerCurrent = '@$lowerCurrent';
 
-    final partnerAliases = {partnerId, cleanPartner, atPartner};
+    final partnerAliases = {
+      partnerId,
+      partnerId.toLowerCase(),
+      cleanPartner,
+      lowerPartner,
+      atPartner,
+      atLowerPartner,
+    };
     final currentAliases = {
       effectiveCurrent,
+      effectiveCurrent.toLowerCase(),
       cleanCurrent,
+      lowerCurrent,
       atCurrent,
+      atLowerCurrent,
       'current_user',
+      '@current_user',
       ?activeUsername,
+      if (activeUsername != null) activeUsername!.toLowerCase(),
       if (activeUsername != null && activeUsername!.startsWith('@'))
-        activeUsername!.substring(1),
+        activeUsername!.substring(1).toLowerCase(),
       if (activeUsername != null && !activeUsername!.startsWith('@'))
-        '@${activeUsername!}',
+        '@${activeUsername!.toLowerCase()}',
     };
 
     Expression<bool>? partnerInvolved;
@@ -177,31 +191,35 @@ class LocalDatabase {
         (currentInvolved ?? const Constant(true));
   }
 
-  /// Retrieve all messages for a partner, newest first (matching reverse list).
+  /// Retrieve messages for a partner, newest first (matching reverse list).
+  /// Paginated with default page size of 50.
   /// Accounts for direct 1-on-1 messages as well as imported shared conversations.
   Future<List<ChatMessage>> getMessagesForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
+    int limit = 50,
+    int offset = 0,
   }) async {
-    final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
+    final clean = partnerId.replaceAll('@', '');
+    final lowerClean = clean.toLowerCase();
     final atPartner = '@$clean';
+    final atLower = '@$lowerClean';
+    final partnerAliases = {partnerId, partnerId.toLowerCase(), clean, lowerClean, atPartner, atLower};
 
     final query = db.select(db.messages)
       ..where((tbl) => _conversationFilter(tbl, partnerId, currentUserId))
-      ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
+      ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
+      ..limit(limit, offset: offset);
 
     var rows = await query.get();
-    if (rows.isEmpty) {
+    if (rows.isEmpty && offset == 0) {
       // Fallback for imported shared conversations where current user wasn't an original participant
       final fallbackQuery = db.select(db.messages)
         ..where((tbl) =>
-            tbl.senderId.equals(partnerId) |
-            tbl.recipientId.equals(partnerId) |
-            tbl.senderId.equals(clean) |
-            tbl.recipientId.equals(clean) |
-            tbl.senderId.equals(atPartner) |
-            tbl.recipientId.equals(atPartner))
-        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
+            tbl.senderId.isIn(partnerAliases) |
+            tbl.recipientId.isIn(partnerAliases))
+        ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)])
+        ..limit(limit, offset: offset);
       rows = await fallbackQuery.get();
     }
     return rows.map(_rowToMessage).toList();
@@ -210,7 +228,7 @@ class LocalDatabase {
   /// Retrieve messages with pagination, accounting for direct and imported conversations
   Future<List<ChatMessage>> getMessagesForPartnerPaginated(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
     required int offset,
     required int limit,
   }) async {
@@ -241,7 +259,7 @@ class LocalDatabase {
 
   /// Retrieve distinct usernames of all partners that have exchanged messages (direct or imported)
   Future<List<String>> getDistinctChatPartners({
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final effectiveCurrent = (currentUserId.isNotEmpty && currentUserId != 'current_user')
         ? currentUserId
@@ -284,7 +302,7 @@ class LocalDatabase {
   /// Retrieve the single latest message for a partner (direct or imported)
   Future<ChatMessage?> getLatestMessageForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -321,7 +339,7 @@ class LocalDatabase {
   /// Get the number of unread incoming messages from a partner
   Future<int> getUnreadCountForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -346,7 +364,7 @@ class LocalDatabase {
   /// Reactive stream of messages for a partner (direct or imported)
   Stream<List<ChatMessage>> watchMessagesForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -377,7 +395,7 @@ class LocalDatabase {
   Future<List<ChatMessage>> searchMessages({
     required String partnerId,
     required String query,
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -452,7 +470,7 @@ class LocalDatabase {
   /// Retrieve all unsent / failed messages pending offline transmission
   Future<List<ChatMessage>> getUnsentMessages({
     String? partnerId,
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final effectiveCurrent = (currentUserId.isNotEmpty && currentUserId != 'current_user')
         ? currentUserId
@@ -506,7 +524,7 @@ class LocalDatabase {
   /// Mark all unread incoming messages from partner as read (Phase 12)
   Future<int> markConversationAsRead(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -524,7 +542,7 @@ class LocalDatabase {
   /// Clear all messages for a partner (direct or imported)
   Future<void> clearMessagesForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final clean = partnerId.startsWith('@') ? partnerId.substring(1) : partnerId;
     final atPartner = '@$clean';
@@ -548,7 +566,7 @@ class LocalDatabase {
   /// Get total message count for a partner (direct or imported)
   Future<int> getMessageCountForPartner(
     String partnerId, {
-    String currentUserId = 'current_user',
+    required String currentUserId,
   }) async {
     final countExp = db.messages.id.count();
     final query = db.selectOnly(db.messages)
@@ -896,18 +914,16 @@ class LocalDatabase {
   }
 
   /// Query all media messages exchanged with a specific partner for the Shared Memory Gallery
-  Future<List<ChatMessage>> getSharedMediaMessages(String partnerUsername) async {
-    final clean = partnerUsername.startsWith('@')
-        ? partnerUsername.substring(1)
-        : partnerUsername;
+  Future<List<ChatMessage>> getSharedMediaMessages(
+    String partnerUsername, {
+    String? currentUserId,
+  }) async {
+    final effectiveCurrent = (currentUserId != null && currentUserId.isNotEmpty && currentUserId != 'current_user')
+        ? currentUserId
+        : (activeUsername ?? currentUserId ?? 'current_user');
     final query = db.select(db.messages)
       ..where((tbl) =>
-          (tbl.senderId.equals(clean) |
-              tbl.senderId.equals('@$clean') |
-              tbl.recipientId.equals(clean) |
-              tbl.recipientId.equals('@$clean') |
-              tbl.senderId.equals('current_user') |
-              tbl.recipientId.equals('current_user')) &
+          _conversationFilter(tbl, partnerUsername, effectiveCurrent) &
           tbl.mediaData.isNotNull())
       ..orderBy([(tbl) => OrderingTerm.desc(tbl.timestamp)]);
     final rows = await query.get();

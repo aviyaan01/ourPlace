@@ -18,4 +18,7 @@ class AppConstants {
 
   // Persistence Keys
   static const String prefActiveUserId = 'nest_active_account_id';
+
+  // Structured Logging Configuration
+  static const bool enableDebugLogs = true;
 }

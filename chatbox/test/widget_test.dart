@@ -172,7 +172,7 @@ void main() {
       );
 
       await localDb.saveMessage(msg);
-      final messages = await localDb.getMessagesForPartner('Twilight');
+      final messages = await localDb.getMessagesForPartner('Twilight', currentUserId: 'current_user');
 
       expect(messages.length, 1);
       expect(messages.first.id, 'test_001');
@@ -194,7 +194,7 @@ void main() {
       await localDb.saveMessage(msg);
       await localDb.updateMessageStatus('test_002', MessageStatus.delivered);
 
-      final messages = await localDb.getMessagesForPartner('Twilight');
+      final messages = await localDb.getMessagesForPartner('Twilight', currentUserId: 'current_user');
       expect(messages.first.status, MessageStatus.delivered);
     });
 
@@ -224,6 +224,7 @@ void main() {
       final searchResults = await localDb.searchMessages(
         partnerId: 'Twilight',
         query: 'secret',
+        currentUserId: 'current_user',
       );
       expect(searchResults.length, 1);
       expect(searchResults.first.id, 'test_003');
@@ -231,7 +232,7 @@ void main() {
       final deleted = await localDb.deleteMessage('test_003');
       expect(deleted, isTrue);
 
-      final remaining = await localDb.getMessagesForPartner('Twilight');
+      final remaining = await localDb.getMessagesForPartner('Twilight', currentUserId: 'current_user');
       expect(remaining.length, 1);
       expect(remaining.first.id, 'test_004');
     });
@@ -1686,7 +1687,7 @@ void main() {
       await chatRepository.sendMessage(message);
 
       // 1. Local SQLite holds cleartext (local-first ownership)
-      final storedMessages = await localDb.getMessagesForPartner('@bob');
+      final storedMessages = await localDb.getMessagesForPartner('@bob', currentUserId: 'current_user');
       expect(storedMessages.length, equals(1));
       expect(storedMessages.first.text, equals('Top secret rendezvous at 9 PM'));
 
@@ -1730,7 +1731,7 @@ void main() {
       expect(processed.text, equals(originalText));
 
       // Check stored in local database as cleartext
-      final stored = await localDb.getMessagesForPartner('@alice');
+      final stored = await localDb.getMessagesForPartner('@alice', currentUserId: 'current_user');
       expect(stored.length, equals(1));
       expect(stored.first.text, equals(originalText));
     });
@@ -3150,7 +3151,7 @@ void main() {
       );
 
       await localDb.saveMessage(mediaMessage);
-      final retrieved = await localDb.getMessagesForPartner('@twilight');
+      final retrieved = await localDb.getMessagesForPartner('@twilight', currentUserId: 'current_user');
 
       expect(retrieved.length, equals(1));
       expect(retrieved.first.id, equals('msg_sql_media_1'));

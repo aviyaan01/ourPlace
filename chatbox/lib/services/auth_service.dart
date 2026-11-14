@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:chatbox/core/config/app_environment.dart';
+import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/errors/app_exception.dart';
 import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/core/utils/recovery_key_utils.dart';
@@ -11,7 +11,9 @@ import 'package:chatbox/services/access_throttling_service.dart';
 import 'package:chatbox/services/encryption_service.dart';
 import 'package:chatbox/services/secure_storage_service.dart';
 import 'package:chatbox/services/user_directory_service.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart' hide User;
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 
 /// Abstract service contract for anonymous identity authentication (Phase 6 & 9)
@@ -124,26 +126,45 @@ class LocalAuthService implements AuthService {
     yield* _authStateController.stream;
   }
 
+  static String toSyntheticEmail(String username) {
+    final clean = HashUtils.normalizeUsername(username).replaceAll('@', '');
+    return '$clean@nest.invalid';
+  }
+
   @override
   Future<bool> isUsernameAvailable(String username) async {
     final validationError = HashUtils.validateUsername(username);
     if (validationError != null) return false;
     final normalized = HashUtils.normalizeUsername(username);
+    final clean = normalized.replaceAll('@', '');
 
     // 1. Check local SQLite storage
     final localTaken = await _db.isUsernameTaken(normalized);
     if (localTaken) return false;
 
-    // 2. Check remote directory (FirebaseUserDirectoryService) to prevent collisions and account takeovers
+    // 2. Check remote atomic registration node /usernames/{username}
+    try {
+      if (Firebase.apps.isNotEmpty) {
+        final rtdb = FirebaseDatabase.instanceFor(
+          app: Firebase.app(),
+          databaseURL: AppConstants.firebaseDatabaseUrl,
+        );
+        final snap = await rtdb.ref('usernames').child(clean).get();
+        if (snap.exists && snap.value != null) {
+          return false;
+        }
+      }
+    } catch (e) {
+      debugPrint('LocalAuthService: isUsernameAvailable /usernames check notice: $e');
+    }
+
+    // 3. Fallback check to directory
     try {
       final remoteProfile = await _directory.lookupProfile(normalized);
       if (remoteProfile != null) {
         return false;
       }
-    } catch (e) {
-      debugPrint(
-          'LocalAuthService: isUsernameAvailable remote directory check notice: $e');
-    }
+    } catch (_) {}
 
     return true;
   }
@@ -182,18 +203,29 @@ class LocalAuthService implements AuthService {
       );
     }
 
-    // 4. Ensure Firebase anonymous authentication has completed before selecting account ID
-    // so accountId matches auth.uid and passes Realtime Database security rules
+    // 4. Firebase Auth Registration with synthetic email (Zero PII)
     String? firebaseUid;
+    final clean = normalized.replaceAll('@', '');
+    final syntheticEmail = toSyntheticEmail(clean);
+
     try {
-      if (FirebaseAuth.instance.currentUser == null) {
-        final cred = await FirebaseAuth.instance.signInAnonymously();
-        firebaseUid = cred.user?.uid;
-      } else {
-        firebaseUid = FirebaseAuth.instance.currentUser?.uid;
+      if (Firebase.apps.isNotEmpty) {
+        try {
+          final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+            email: syntheticEmail,
+            password: password,
+          );
+          firebaseUid = cred.user?.uid;
+        } on FirebaseAuthException catch (authEx) {
+          if (authEx.code == 'email-already-in-use') {
+            throw AuthException('Username $normalized is already registered', code: 'USERNAME_TAKEN');
+          }
+          debugPrint('LocalAuthService: Firebase createUser notice: $authEx');
+        }
       }
     } catch (e) {
-      debugPrint('LocalAuthService: Anonymous sign-in during registration notice: $e');
+      if (e is AuthException) rethrow;
+      debugPrint('LocalAuthService: Firebase auth registration notice: $e');
     }
 
     final randomSuffix = Random.secure().nextInt(90000) + 10000;
@@ -211,7 +243,7 @@ class LocalAuthService implements AuthService {
     await _encryptionService.initializeUserKeys(accountId);
     final publicIdentityKey = await _encryptionService.getPublicIdentityKey();
 
-    // 6. Create secure UserAccount (salted hash verifiers, never plaintext)
+    // 6. Create secure UserAccount locally
     final account = UserAccount.create(
       accountId: accountId,
       username: normalized,
@@ -225,11 +257,32 @@ class LocalAuthService implements AuthService {
     await _db.saveAccount(account);
     await _db.logSecurityEvent(
       'account_created',
-      'New anonymous account registered: $normalized with E2EE identity key',
+      'New account registered: $normalized with E2EE identity key',
       severity: 'info',
     );
 
-    // 7b. Publish public identity key to remote directory (Trial & Discovery Bridge)
+    // 7b. Atomic claim in /usernames and write /users/$uid/profile
+    try {
+      if (Firebase.apps.isNotEmpty) {
+        final rtdb = FirebaseDatabase.instanceFor(
+          app: Firebase.app(),
+          databaseURL: AppConstants.firebaseDatabaseUrl,
+        );
+        // Atomic claim under /usernames/$clean = accountId
+        await rtdb.ref('usernames').child(clean).set(accountId);
+
+        // Write profile under /users/$accountId/profile
+        await rtdb.ref('users').child(accountId).child('profile').set({
+          'username': normalized,
+          'publicIdentityKey': publicIdentityKey,
+          'createdAt': ServerValue.timestamp,
+        });
+      }
+    } catch (e) {
+      debugPrint('LocalAuthService: Remote atomic claim / profile write notice: $e');
+    }
+
+    // Also publish to Directory service bridge
     try {
       await _directory.publishProfile(
         DirectoryProfile(
@@ -239,26 +292,7 @@ class LocalAuthService implements AuthService {
           lastSeen: DateTime.now().toUtc(),
         ),
       );
-      debugPrint('LocalAuthService: Successfully published profile for $normalized to directory');
-    } catch (e) {
-      debugPrint('LocalAuthService: Directory publish notice: $e');
-      if (AppEnvironment.isProduction) {
-        try {
-          await FirebaseAuth.instance.signInAnonymously();
-          final freshUid = FirebaseAuth.instance.currentUser?.uid ?? accountId;
-          await _directory.publishProfile(
-            DirectoryProfile(
-              accountId: freshUid,
-              username: normalized,
-              publicIdentityKey: publicIdentityKey,
-              lastSeen: DateTime.now().toUtc(),
-            ),
-          );
-        } catch (retryError) {
-          debugPrint('LocalAuthService: Directory publish retry notice: $retryError');
-        }
-      }
-    }
+    } catch (_) {}
 
     // 8. Establish authenticated session
     _currentUser = account.toUser(isCurrentUser: true);
@@ -274,6 +308,8 @@ class LocalAuthService implements AuthService {
     required String password,
   }) async {
     final normalized = HashUtils.normalizeUsername(username);
+    final clean = normalized.replaceAll('@', '');
+    final syntheticEmail = toSyntheticEmail(clean);
 
     // 1. Check rate limiting & exponential backoff
     if (!_throttlingService.canAttemptLogin(normalized)) {
@@ -289,8 +325,63 @@ class LocalAuthService implements AuthService {
       );
     }
 
-    // 2. Retrieve account by username
-    final account = await _db.getAccountByUsername(normalized);
+    // 2. Authenticate with Firebase Auth if available
+    String? firebaseUid;
+    try {
+      if (Firebase.apps.isNotEmpty) {
+        try {
+          final cred = await FirebaseAuth.instance.signInWithEmailAndPassword(
+            email: syntheticEmail,
+            password: password,
+          );
+          firebaseUid = cred.user?.uid;
+        } on FirebaseAuthException catch (authEx) {
+          if (authEx.code == 'user-not-found' ||
+              authEx.code == 'wrong-password' ||
+              authEx.code == 'invalid-credential') {
+            _throttlingService.recordFailedLogin(normalized);
+            throw const AuthException(
+              'Incorrect username or password',
+              code: 'INVALID_CREDENTIALS',
+            );
+          }
+          debugPrint('LocalAuthService: Firebase signIn notice: $authEx');
+        }
+      }
+    } catch (e) {
+      if (e is AuthException) rethrow;
+      debugPrint('LocalAuthService: Firebase login notice: $e');
+    }
+
+    // 3. Retrieve account by username from local SQLite
+    UserAccount? account = await _db.getAccountByUsername(normalized);
+
+    // If account not found locally but Firebase login succeeded (e.g. secondary phone)
+    if (account == null && firebaseUid != null) {
+      try {
+        final rtdb = FirebaseDatabase.instanceFor(
+          app: Firebase.app(),
+          databaseURL: AppConstants.firebaseDatabaseUrl,
+        );
+        final profileSnap =
+            await rtdb.ref('users').child(firebaseUid).child('profile').get();
+        if (profileSnap.exists && profileSnap.value is Map) {
+          final profileMap = Map<String, dynamic>.from(profileSnap.value as Map);
+          final pubKey = profileMap['publicIdentityKey'] as String? ?? '';
+          account = UserAccount.create(
+            accountId: firebaseUid,
+            username: normalized,
+            plaintextPassword: password,
+            publicIdentityKey: pubKey,
+          );
+          await _db.saveAccount(account);
+        }
+      } catch (remoteError) {
+        debugPrint(
+            'LocalAuthService: Remote profile restoration notice: $remoteError');
+      }
+    }
+
     if (account == null) {
       _throttlingService.recordFailedLogin(normalized);
       await _db.logSecurityEvent(
@@ -304,7 +395,7 @@ class LocalAuthService implements AuthService {
       );
     }
 
-    // 3. Verify candidate password against salted hash verifier
+    // 4. Verify candidate password against salted hash verifier
     final isValid = account.verifyPassword(password);
     if (!isValid) {
       _throttlingService.recordFailedLogin(normalized);
@@ -319,13 +410,13 @@ class LocalAuthService implements AuthService {
       );
     }
 
-    // 4. Clear throttling on successful login
+    // 5. Clear throttling on successful login
     _throttlingService.recordSuccessfulLogin(normalized);
 
-    // 4b. Load E2EE keys for authenticated session
+    // 5b. Load E2EE keys for authenticated session
     await _encryptionService.initializeUserKeys(account.accountId);
 
-    // 4c. Update remote directory presence & ensure public key is published
+    // 5c. Update remote presence / directory
     try {
       final pubKey = await _encryptionService.getPublicIdentityKey();
       await _directory.publishProfile(
@@ -344,7 +435,7 @@ class LocalAuthService implements AuthService {
       severity: 'info',
     );
 
-    // 5. Establish authenticated session
+    // 6. Establish authenticated session
     _currentUser = account.toUser(isCurrentUser: true);
     await _secureStorage.write('active_session_username', normalized);
     _authStateController.add(_currentUser);

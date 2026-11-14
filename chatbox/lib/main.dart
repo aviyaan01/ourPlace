@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:chatbox/core/config/app_environment.dart';
 import 'package:chatbox/core/constants/app_constants.dart';
 import 'package:chatbox/core/theme/app_theme.dart';
@@ -66,18 +68,38 @@ void main() async {
     debugPrint('LocalDatabase warmup notice: $dbError');
   }
 
-  // 4. Firebase Pre-flight Authentication
-  // Initialize Firebase and ensure anonymous authentication is established
-  // immediately so Realtime Database security rules (auth != null) are satisfied
-  // for early user directory lookups and relay listeners.
+  // 4. Firebase Pre-flight, App Check & RTDB Offline Persistence
+  // Initialize Firebase and activate Play Integrity App Check to ensure only
+  // verified Nest binaries interact with the Realtime Database and Cloud Functions.
   try {
     await Firebase.initializeApp();
+
+    // Enable offline disk persistence on Realtime Database (100MB cache)
     try {
-      if (FirebaseAuth.instance.currentUser == null) {
-        await FirebaseAuth.instance.signInAnonymously();
-      }
-    } catch (authError) {
-      debugPrint('FirebaseAuth anonymous sign-in notice: $authError');
+      final rtdb = FirebaseDatabase.instanceFor(
+        app: Firebase.app(),
+        databaseURL: AppConstants.firebaseDatabaseUrl,
+      );
+      rtdb.setPersistenceEnabled(true);
+      rtdb.setPersistenceCacheSizeBytes(100 * 1024 * 1024);
+    } catch (_) {
+      try {
+        FirebaseDatabase.instance.setPersistenceEnabled(true);
+      } catch (_) {}
+    }
+
+    // Activate Firebase App Check (Play Integrity in release, Debug provider in debug)
+    try {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider: kReleaseMode
+            ? AndroidProvider.playIntegrity
+            : AndroidProvider.debug,
+        appleProvider: kReleaseMode
+            ? AppleProvider.deviceCheck
+            : AppleProvider.debug,
+      );
+    } catch (appCheckError) {
+      debugPrint('FirebaseAppCheck activation notice: $appCheckError');
     }
   } catch (e) {
     debugPrint('Firebase initialization notice: $e');

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:chatbox/main.dart';
 import 'package:chatbox/core/constants/app_constants.dart';
+import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/models/media_attachment.dart';
 import 'package:chatbox/models/message.dart';
 import 'package:chatbox/models/user.dart';
@@ -86,11 +88,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _chatRepository.syncService.reconcile(currentUserId: activeId);
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final scopeRepo = AppScope.maybeOf(context)?.chatRepository;
+    if (widget.repository == null && scopeRepo != null && _chatRepository != scopeRepo) {
+      _chatRepository = scopeRepo;
+      _messageSubscription?.cancel();
+      _typingSubscription?.cancel();
+      _presenceSubscription?.cancel();
+      _luvBurstSubscription?.cancel();
+      _initRealtimeSubscriptions();
+    }
+  }
+
   void _initRealtimeSubscriptions() {
     // 1. Reactive messages stream from local SQLite
     _messageSubscription = _chatRepository
         .watchMessages(widget.partnerId, currentUserId: _currentUserId)
         .listen((updatedList) {
+      debugPrint('UI STREAM EMIT: received ${updatedList.length} messages for ${widget.partnerId}');
       if (mounted) {
         setState(() {
           _messages = updatedList;
@@ -189,6 +206,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _messageSubscription?.cancel();
     _luvBurstSubscription?.cancel();
     _recordingTimer?.cancel();
+    _chatRepository.realtimeService.stopWatchingPartner(
+      currentUserId: _currentUserId,
+      partnerId: widget.partnerId,
+    );
     _chatRepository.realtimeService.sendTyping(
       currentUserId: _currentUserId,
       partnerId: widget.partnerId,
@@ -327,10 +348,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     if (text.isEmpty && att == null) return;
 
+    final normSender = HashUtils.normalizeUsername(_currentUserId);
+    final normRecipient = HashUtils.normalizeUsername(widget.partnerId);
+
     final newMessage = ChatMessage(
       id: 'msg_${DateTime.now().millisecondsSinceEpoch}',
-      senderId: _currentUserId,
-      recipientId: widget.partnerId,
+      senderId: normSender,
+      recipientId: normRecipient,
       text: text,
       timestamp: DateTime.now(),
       type: att?.type ?? MessageType.text,
@@ -370,8 +394,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       } else {
         await _chatRepository.sendMessage(newMessage);
       }
-    } catch (_) {
-      // Repository automatically updates local message status to failed
+    } catch (e) {
+      debugPrint('SEND: chat_screen caught send error: $e');
     }
   }
 
