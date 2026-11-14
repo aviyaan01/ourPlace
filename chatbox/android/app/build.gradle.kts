@@ -17,17 +17,17 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.ourplace.nest"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+        jvmTarget = JavaVersion.VERSION_11.toString()
     }
 
     defaultConfig {
@@ -65,13 +65,15 @@ android {
 
 configurations.all {
     resolutionStrategy {
-        force("androidx.core:core:1.15.0")
-        force("androidx.core:core-ktx:1.15.0")
+        force("androidx.core:core:1.17.0")
+        force("androidx.core:core-ktx:1.17.0")
     }
 }
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation("androidx.core:core:1.17.0")
+    implementation("androidx.core:core-ktx:1.17.0")
 }
 
 flutter {

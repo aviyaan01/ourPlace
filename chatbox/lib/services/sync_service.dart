@@ -455,23 +455,28 @@ class DefaultSyncService implements SyncService {
     await _database.saveMessage(decryptedMessage);
     debugPrint('DB INSERT: messageId=${decryptedMessage.id}, status=saved_to_sqlite, sender=${decryptedMessage.senderId}');
 
-    // Notify user locally using privacy-preserving settings (zero leak)
-    await _notificationService?.showLocalAlert(
-      title: decryptedMessage.senderId,
-      body: decryptedMessage.mediaAttachment != null
-          ? (decryptedMessage.mediaAttachment!.isImage
-              ? '📷 Photo'
-              : decryptedMessage.mediaAttachment!.isAudio
-                  ? '🎙️ Voice note'
-                  : '🎥 Video')
-          : decryptedMessage.text,
-      conversationId: decryptedMessage.senderId,
-    );
-
     // Atomic ACK: call .remove() ONLY AFTER local insert succeeds
     await ackEnvelope();
     if (AppConstants.enableDebugLogs) {
       debugPrint('RECV: pushId=${envelope.id}, decrypted=true, ack=true');
+    }
+
+    // Notify user locally using privacy-preserving settings (zero leak)
+    // Pipeline does NOT depend on notification succeeding: save to SQLite and ACK happen BEFORE.
+    try {
+      await _notificationService?.showLocalAlert(
+        title: decryptedMessage.senderId,
+        body: decryptedMessage.mediaAttachment != null
+            ? (decryptedMessage.mediaAttachment!.isImage
+                ? '📷 Photo'
+                : decryptedMessage.mediaAttachment!.isAudio
+                    ? '🎙️ Voice note'
+                    : '🎥 Video')
+            : decryptedMessage.text,
+        conversationId: decryptedMessage.senderId,
+      );
+    } catch (notifErr) {
+      debugPrint('SyncService: showLocalAlert error (handled safely): $notifErr');
     }
 
     // Dispatch ephemeral delivery receipt back to original sender

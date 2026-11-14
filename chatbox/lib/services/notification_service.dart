@@ -22,6 +22,18 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
     await localNotifications.initialize(settings: initSettings);
 
+    final androidPlugin = localNotifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      const channel = AndroidNotificationChannel(
+        'nest_messages',
+        'Private Messages',
+        description: 'End-to-end encrypted private message notifications',
+        importance: Importance.high,
+      );
+      await androidPlugin.createNotificationChannel(channel);
+    }
+
     String title = 'Nest';
     String body = 'New private message received';
 
@@ -162,28 +174,42 @@ class DefaultNotificationService implements NotificationService {
 
   @override
   Future<void> initialize() async {
-    if (AppEnvironment.isProduction) {
-      try {
-        const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-        const darwinSettings = DarwinInitializationSettings();
-        const initSettings = InitializationSettings(
-          android: androidSettings,
-          iOS: darwinSettings,
-          macOS: darwinSettings,
-        );
+    try {
+      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const darwinSettings = DarwinInitializationSettings();
+      const initSettings = InitializationSettings(
+        android: androidSettings,
+        iOS: darwinSettings,
+        macOS: darwinSettings,
+      );
 
-        await _localNotifications.initialize(
-          settings: initSettings,
-          onDidReceiveNotificationResponse: (NotificationResponse response) {
-            final payload = response.payload;
-            if (payload != null && payload.isNotEmpty) {
-              simulateNotificationTap(payload);
-            }
-          },
+      await _localNotifications.initialize(
+        settings: initSettings,
+        onDidReceiveNotificationResponse: (NotificationResponse response) {
+          final payload = response.payload;
+          if (payload != null && payload.isNotEmpty) {
+            simulateNotificationTap(payload);
+          }
+        },
+      );
+
+      // Create Android Notification Channel before any alerts are shown
+      final androidPlugin = _localNotifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      if (androidPlugin != null) {
+        const channel = AndroidNotificationChannel(
+          'nest_messages',
+          'Private Messages',
+          description: 'End-to-end encrypted private message notifications',
+          importance: Importance.high,
         );
-      } catch (e) {
-        debugPrint('DefaultNotificationService: local notifications init error: $e');
+        await androidPlugin.createNotificationChannel(channel);
+
+        // Request POST_NOTIFICATIONS permission on Android 13+ (API 33+)
+        await androidPlugin.requestNotificationsPermission();
       }
+    } catch (e) {
+      debugPrint('DefaultNotificationService: local notifications init error: $e');
     }
 
     if (AppEnvironment.isProduction) {
@@ -200,17 +226,21 @@ class DefaultNotificationService implements NotificationService {
         }
         FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
         FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-          if (message.data['type'] == 'wakeup') {
-            final sender = message.data['senderId'] as String? ?? 'Partner';
-            showLocalAlert(
-              title: 'New Message',
-              body: 'Encrypted message from $sender',
-              conversationId: sender,
-            );
+          try {
+            if (message.data['type'] == 'wakeup') {
+              final sender = message.data['senderId'] as String? ?? 'Partner';
+              showLocalAlert(
+                title: 'New Message',
+                body: 'Encrypted message from $sender',
+                conversationId: sender,
+              );
+            }
+          } catch (e) {
+            debugPrint('FirebaseMessaging onMessage error: $e');
           }
         });
       } catch (e) {
-        debugPrint('DefaultNotificationService: initialize error: $e');
+        debugPrint('DefaultNotificationService: Firebase messaging init error: $e');
       }
     }
   }
@@ -234,11 +264,15 @@ class DefaultNotificationService implements NotificationService {
     required String body,
     String? payload,
   }) async {
-    await showLocalAlert(
-      title: title,
-      body: body,
-      conversationId: payload,
-    );
+    try {
+      await showLocalAlert(
+        title: title,
+        body: body,
+        conversationId: payload,
+      );
+    } catch (e) {
+      debugPrint('DefaultNotificationService: showNotification error (handled safely): $e');
+    }
   }
 
   @override
@@ -248,57 +282,62 @@ class DefaultNotificationService implements NotificationService {
     String? conversationId,
     bool? isDiscreet,
   }) async {
-    if (!_settings.enabled) return;
+    try {
+      if (!_settings.enabled) return;
 
-    final discreet = isDiscreet ?? _settings.hidePreviewOnLockScreen;
-    final displayTitle = discreet ? 'Nest' : title;
-    final displayBody = discreet ? 'New private message received' : body;
+      final discreet = isDiscreet ?? _settings.hidePreviewOnLockScreen;
+      // In Discreet Mode, never expose plaintext message content or sender identities
+      final displayTitle = (discreet || _settings.hideSenderIdentity) ? 'Nest' : title;
+      final displayBody = discreet ? 'New private message received' : body;
 
-    final alertData = {
-      'title': displayTitle,
-      'body': displayBody,
-      'conversationId': conversationId,
-      'isDiscreet': discreet,
-      'timestamp': DateTime.now().millisecondsSinceEpoch,
-    };
+      final alertData = {
+        'title': displayTitle,
+        'body': displayBody,
+        'conversationId': conversationId,
+        'isDiscreet': discreet,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      };
 
-    displayedAlerts.add(alertData);
-    if (!_displayedController.isClosed) {
-      _displayedController.add(alertData);
-    }
-
-    if (AppEnvironment.isProduction) {
-      try {
-        const androidDetails = AndroidNotificationDetails(
-          'nest_messages',
-          'Private Messages',
-          channelDescription: 'End-to-end encrypted private message notifications',
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/ic_launcher',
-        );
-        const darwinDetails = DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        );
-        const details = NotificationDetails(
-          android: androidDetails,
-          iOS: darwinDetails,
-          macOS: darwinDetails,
-        );
-
-        final notifId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        await _localNotifications.show(
-          id: notifId,
-          title: displayTitle,
-          body: displayBody,
-          notificationDetails: details,
-          payload: conversationId,
-        );
-      } catch (e) {
-        debugPrint('DefaultNotificationService: local notification show error: $e');
+      displayedAlerts.add(alertData);
+      if (!_displayedController.isClosed) {
+        _displayedController.add(alertData);
       }
+
+      if (AppEnvironment.isProduction) {
+        try {
+          const androidDetails = AndroidNotificationDetails(
+            'nest_messages',
+            'Private Messages',
+            channelDescription: 'End-to-end encrypted private message notifications',
+            importance: Importance.high,
+            priority: Priority.high,
+            icon: '@mipmap/ic_launcher',
+          );
+          const darwinDetails = DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          );
+          const details = NotificationDetails(
+            android: androidDetails,
+            iOS: darwinDetails,
+            macOS: darwinDetails,
+          );
+
+          final notifId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+          await _localNotifications.show(
+            id: notifId,
+            title: displayTitle,
+            body: displayBody,
+            notificationDetails: details,
+            payload: conversationId,
+          );
+        } catch (e) {
+          debugPrint('DefaultNotificationService: local notification show error (handled safely): $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('DefaultNotificationService: showLocalAlert outer error (handled safely): $e');
     }
   }
 
