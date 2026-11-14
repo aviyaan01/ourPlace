@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math';
+import 'package:chatbox/core/config/app_environment.dart';
 import 'package:chatbox/core/errors/app_exception.dart';
 import 'package:chatbox/core/utils/hash_utils.dart';
 import 'package:chatbox/core/utils/recovery_key_utils.dart';
@@ -181,16 +182,24 @@ class LocalAuthService implements AuthService {
       );
     }
 
-    // 4. Generate account ID (reusing Firebase Auth UID if authenticated)
-    final randomSuffix = Random.secure().nextInt(90000) + 10000;
-    String accountId =
-        'acc_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix';
+    // 4. Ensure Firebase anonymous authentication has completed before selecting account ID
+    // so accountId matches auth.uid and passes Realtime Database security rules
+    String? firebaseUid;
     try {
-      final firebaseUid = FirebaseAuth.instance.currentUser?.uid;
-      if (firebaseUid != null && firebaseUid.isNotEmpty) {
-        accountId = firebaseUid;
+      if (FirebaseAuth.instance.currentUser == null) {
+        final cred = await FirebaseAuth.instance.signInAnonymously();
+        firebaseUid = cred.user?.uid;
+      } else {
+        firebaseUid = FirebaseAuth.instance.currentUser?.uid;
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('LocalAuthService: Anonymous sign-in during registration notice: $e');
+    }
+
+    final randomSuffix = Random.secure().nextInt(90000) + 10000;
+    final accountId = (firebaseUid != null && firebaseUid.isNotEmpty)
+        ? firebaseUid
+        : 'acc_${DateTime.now().millisecondsSinceEpoch}_$randomSuffix';
 
     // 5. Generate and hash 12-word recovery key
     final phrase = recoveryKey ?? RecoveryKeyUtils.generateMnemonic();
@@ -230,8 +239,25 @@ class LocalAuthService implements AuthService {
           lastSeen: DateTime.now().toUtc(),
         ),
       );
+      debugPrint('LocalAuthService: Successfully published profile for $normalized to directory');
     } catch (e) {
       debugPrint('LocalAuthService: Directory publish notice: $e');
+      if (AppEnvironment.isProduction) {
+        try {
+          await FirebaseAuth.instance.signInAnonymously();
+          final freshUid = FirebaseAuth.instance.currentUser?.uid ?? accountId;
+          await _directory.publishProfile(
+            DirectoryProfile(
+              accountId: freshUid,
+              username: normalized,
+              publicIdentityKey: publicIdentityKey,
+              lastSeen: DateTime.now().toUtc(),
+            ),
+          );
+        } catch (retryError) {
+          debugPrint('LocalAuthService: Directory publish retry notice: $retryError');
+        }
+      }
     }
 
     // 8. Establish authenticated session

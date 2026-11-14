@@ -42,6 +42,8 @@ class _InboxScreenState extends State<InboxScreen> {
 
   List<Conversation> _allConversations = [];
   List<Conversation> _filteredConversations = [];
+  List<DirectoryProfile> _remoteSearchResults = [];
+  Timer? _searchDebounceTimer;
   bool _isLoading = true;
   String _searchQuery = '';
 
@@ -81,6 +83,7 @@ class _InboxScreenState extends State<InboxScreen> {
 
   @override
   void dispose() {
+    _searchDebounceTimer?.cancel();
     _conversationsSub?.cancel();
     _notificationSub?.cancel();
     _searchController.removeListener(_onSearchChanged);
@@ -108,6 +111,24 @@ class _InboxScreenState extends State<InboxScreen> {
       _searchQuery = query;
       _applySearchFilter();
     });
+
+    _searchDebounceTimer?.cancel();
+    if (query.isNotEmpty) {
+      _searchDebounceTimer = Timer(const Duration(milliseconds: 300), () async {
+        try {
+          final results = await DefaultUserDirectoryService().searchUsers(query);
+          if (mounted && _searchQuery == query) {
+            setState(() {
+              _remoteSearchResults = results;
+            });
+          }
+        } catch (_) {}
+      });
+    } else {
+      setState(() {
+        _remoteSearchResults = [];
+      });
+    }
   }
 
   Future<void> _loadConversations() async {
@@ -144,101 +165,47 @@ class _InboxScreenState extends State<InboxScreen> {
   }
 
   void _showNewConversationDialog() {
-    final usernameController = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF242424),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          title: const Text(
-            'Start a Conversation',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Enter username to start a private one-on-one chat:',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-              const SizedBox(height: 14),
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF383838),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-                child: TextField(
-                  controller: usernameController,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.white,
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    prefixText: '@',
-                    prefixStyle: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    hintText: 'username',
-                    hintStyle: TextStyle(color: Colors.white38),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.black,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-              ),
-              onPressed: () async {
-                final raw = usernameController.text.trim();
-                if (raw.isEmpty) return;
-                final clean = raw.replaceAll('@', '').trim();
-                if (clean.isEmpty) return;
-                final normalized = '@$clean';
+        return _NewConversationDialog(
+          onStartChat: (raw) async {
+            final trimmed = raw.trim();
+            if (trimmed.isEmpty) return;
+            final clean = trimmed.replaceAll('@', '').trim();
+            if (clean.isEmpty) return;
+            final normalized = '@$clean';
 
-                // Look up profile if available in directory to resolve public key
-                String? publicKey;
-                try {
-                  final profile =
-                      await DefaultUserDirectoryService().lookupProfile(normalized);
-                  publicKey = profile?.publicIdentityKey;
-                } catch (_) {}
+            // Look up profile if available in directory to resolve public key
+            String? publicKey;
+            try {
+              final profile =
+                  await DefaultUserDirectoryService().lookupProfile(normalized);
+              publicKey = profile?.publicIdentityKey;
+            } catch (_) {}
 
-                final displayName = clean.length > 1
-                    ? clean[0].toUpperCase() + clean.substring(1)
-                    : clean.toUpperCase();
-                final partnerUser = User(
-                  id: 'user_$clean',
-                  username: normalized,
-                  displayName: displayName,
-                  publicIdentityKey: publicKey,
-                  isCurrentUser: false,
-                );
+            final displayName = clean.length > 1
+                ? clean[0].toUpperCase() + clean.substring(1)
+                : clean.toUpperCase();
+            final partnerUser = User(
+              id: 'user_$clean',
+              username: normalized,
+              displayName: displayName,
+              publicIdentityKey: publicKey,
+              isCurrentUser: false,
+            );
 
-                if (ctx.mounted) {
-                  Navigator.of(ctx).pop();
-                }
-                final newConv = await _conversationRepo.startOrGetConversation(
-                  partner: partnerUser,
-                );
-                _openConversation(newConv);
-              },
-              child: const Text('Start Chat', style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-          ],
+            if (ctx.mounted) {
+              Navigator.of(ctx).pop();
+            }
+            final newConv = await _conversationRepo.startOrGetConversation(
+              partner: partnerUser,
+            );
+            _openConversation(newConv);
+          },
         );
       },
-    ).whenComplete(() => usernameController.dispose());
+    );
   }
 
   @override
@@ -271,23 +238,85 @@ class _InboxScreenState extends State<InboxScreen> {
                       color: Colors.white,
                       backgroundColor: const Color(0xFF383838),
                       onRefresh: _loadConversations,
-                      child: _searchQuery.isNotEmpty && _filteredConversations.isEmpty
+                      child: _searchQuery.isNotEmpty &&
+                              _filteredConversations.isEmpty &&
+                              _remoteSearchResults.isEmpty
                           ? _buildEmptyState()
                           : ListView(
                               padding: const EdgeInsets.only(bottom: 24),
                               children: [
                                 if (_searchQuery.isNotEmpty) ...[
-                                  /// Filtered Search Results (includes all matching conversations)
-                                  _buildSectionHeader(
-                                    'SEARCH RESULTS (${_filteredConversations.length})',
-                                  ),
-                                  ..._filteredConversations.map(
-                                    (conv) => ConversationTile(
-                                      conversation: conv,
-                                      currentUserId: _activeUserId,
-                                      onTap: () => _openConversation(conv),
+                                  /// Local conversation search matches
+                                  if (_filteredConversations.isNotEmpty) ...[
+                                    _buildSectionHeader(
+                                      'SEARCH RESULTS (${_filteredConversations.length})',
                                     ),
-                                  ),
+                                    ..._filteredConversations.map(
+                                      (conv) => ConversationTile(
+                                        conversation: conv,
+                                        currentUserId: _activeUserId,
+                                        onTap: () => _openConversation(conv),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                  ],
+                                  /// Discovered directory users from Firebase / registry
+                                  if (_remoteSearchResults.isNotEmpty) ...[
+                                    _buildSectionHeader(
+                                      'DISCOVERED USERS (${_remoteSearchResults.length})',
+                                      hasAccent: true,
+                                    ),
+                                    ..._remoteSearchResults.map((profile) {
+                                      final clean = profile.username.replaceAll('@', '');
+                                      final displayName = clean.isNotEmpty
+                                          ? clean[0].toUpperCase() + clean.substring(1)
+                                          : profile.username;
+                                      final partnerUser = User(
+                                        id: 'user_$clean',
+                                        username: profile.username,
+                                        displayName: displayName,
+                                        publicIdentityKey: profile.publicIdentityKey,
+                                        isCurrentUser: false,
+                                      );
+                                      return ListTile(
+                                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                        leading: CircleAvatar(
+                                          backgroundColor: const Color(0xFF383838),
+                                          child: Text(
+                                            displayName.isNotEmpty ? displayName[0] : '?',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                        title: Text(
+                                          displayName,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          profile.username,
+                                          style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        trailing: const Icon(
+                                          Icons.chat_bubble_outline,
+                                          color: Colors.white70,
+                                          size: 20,
+                                        ),
+                                        onTap: () async {
+                                          final newConv = await _conversationRepo
+                                              .startOrGetConversation(partner: partnerUser);
+                                          _openConversation(newConv);
+                                        },
+                                      );
+                                    }),
+                                  ],
                                 ] else ...[
                                   /// Love Connection Section (Always pinned at top when not searching)
                                   _buildSectionHeader(
@@ -617,6 +646,93 @@ class _InboxScreenState extends State<InboxScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Dedicated dialog widget with managed controller lifecycle to prevent
+/// 'TextEditingController used after being disposed' assertions during pop animations.
+class _NewConversationDialog extends StatefulWidget {
+  final Future<void> Function(String username) onStartChat;
+
+  const _NewConversationDialog({required this.onStartChat});
+
+  @override
+  State<_NewConversationDialog> createState() => _NewConversationDialogState();
+}
+
+class _NewConversationDialogState extends State<_NewConversationDialog> {
+  late final TextEditingController _usernameController;
+
+  @override
+  void initState() {
+    super.initState();
+    _usernameController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _usernameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: const Color(0xFF242424),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      title: const Text(
+        'Start a Conversation',
+        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Enter username to start a private one-on-one chat:',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF383838),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            child: TextField(
+              controller: _usernameController,
+              style: const TextStyle(color: Colors.white),
+              cursorColor: Colors.white,
+              decoration: const InputDecoration(
+                border: InputBorder.none,
+                prefixText: '@',
+                prefixStyle: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+                hintText: 'username',
+                hintStyle: TextStyle(color: Colors.white38),
+              ),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.white,
+            foregroundColor: Colors.black,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          ),
+          onPressed: () => widget.onStartChat(_usernameController.text),
+          child: const Text('Start Chat', style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ],
     );
   }
 }

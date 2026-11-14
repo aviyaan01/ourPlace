@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:chatbox/main.dart';
 import 'package:chatbox/models/user.dart';
 import 'package:chatbox/repositories/auth_repository.dart';
 import 'package:chatbox/repositories/chat_repository.dart';
@@ -9,7 +10,9 @@ import 'package:chatbox/screens/auth/auth_screen.dart';
 import 'package:chatbox/screens/auth/passcode_setup_screen.dart';
 import 'package:chatbox/screens/home_screen.dart';
 
-/// Entryway gate that coordinates account session and local device lock state
+/// Entryway gate that coordinates account session and local device lock state.
+/// Employs explicit ValueKeys and route unmounting guards to prevent
+/// Flutter InheritedElement deactivation assertions ('_dependents.isEmpty').
 class AuthGate extends StatefulWidget {
   final AuthRepository? authRepository;
   final ChatRepository? chatRepository;
@@ -27,9 +30,9 @@ class AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
-  late final AuthRepository _authRepository;
-  late final AppLockService _appLockService;
-  late final ChatRepository _chatRepository;
+  late AuthRepository _authRepository;
+  late AppLockService _appLockService;
+  late ChatRepository _chatRepository;
   StreamSubscription<bool>? _lockStateSub;
   bool? _isPasscodeConfigured;
   String? _lastUserId;
@@ -38,15 +41,51 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _resolveDependencies();
+    _refreshPasscodeStatus();
+    _subscribeLockState();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final appScope = AppScope.maybeOf(context);
+    if (appScope != null) {
+      if (widget.authRepository == null) _authRepository = appScope.authRepository;
+      if (widget.chatRepository == null) _chatRepository = appScope.chatRepository;
+      if (widget.appLockService == null) {
+        if (_appLockService != appScope.appLockService) {
+          _appLockService = appScope.appLockService;
+          _subscribeLockState();
+        }
+      }
+    }
+  }
+
+  @override
+  void didUpdateWidget(AuthGate oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.authRepository != oldWidget.authRepository ||
+        widget.chatRepository != oldWidget.chatRepository ||
+        widget.appLockService != oldWidget.appLockService) {
+      _resolveDependencies();
+      _subscribeLockState();
+    }
+  }
+
+  void _resolveDependencies() {
     _authRepository = widget.authRepository ?? DefaultAuthRepository();
     _appLockService = widget.appLockService ?? DefaultAppLockService();
     _chatRepository = widget.chatRepository ?? LocalChatRepository();
+  }
 
-    _refreshPasscodeStatus();
-
+  void _subscribeLockState() {
+    _lockStateSub?.cancel();
     _lockStateSub = _appLockService.lockStateChanges.listen((_) {
-      if (mounted) setState(() {});
-      _refreshPasscodeStatus();
+      if (mounted) {
+        setState(() {});
+        _refreshPasscodeStatus();
+      }
     });
   }
 
@@ -63,7 +102,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
       // Guard against infinite auto-lock loops when native OS biometric dialogs
-      // (Face ID / Fingerprint) transition the app lifecycle to paused or hidden.
+      // transition the app lifecycle to paused or hidden.
       if (_appLockService.isAppUnlocked &&
           !_appLockService.isAuthenticatingBiometrics) {
         _appLockService.lockApp();
@@ -85,6 +124,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
       builder: (context, authSnapshot) {
         if (authSnapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
+            key: ValueKey('gate_loading_scaffold'),
             backgroundColor: Colors.black,
             body: Center(
               child: CircularProgressIndicator(
@@ -95,6 +135,16 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         }
 
         final user = authSnapshot.data;
+
+        // Clean up pushed routes upon user sign out or transition to unauthenticated
+        if (_lastUserId != null && user == null) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && Navigator.of(context).canPop()) {
+              Navigator.of(context).popUntil((route) => route.isFirst);
+            }
+          });
+        }
+
         if (user?.id != _lastUserId) {
           _lastUserId = user?.id;
           if (user != null) {
@@ -107,6 +157,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         /// 1. Unauthenticated -> Show login / account creation screen
         if (user == null) {
           return AuthScreen(
+            key: const ValueKey('gate_auth_screen'),
             authRepository: _authRepository,
           );
         }
@@ -114,6 +165,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         /// 2. Authenticated user -> Check device lock state
         if (_isPasscodeConfigured == null) {
           return const Scaffold(
+            key: ValueKey('gate_passcode_checking_scaffold'),
             backgroundColor: Colors.black,
             body: Center(
               child: CircularProgressIndicator(
@@ -126,6 +178,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         /// 2A. No local passcode configured -> Force first-time passcode setup
         if (!_isPasscodeConfigured!) {
           return PasscodeSetupScreen(
+            key: const ValueKey('gate_passcode_setup_screen'),
             appLockService: _appLockService,
             onSetupComplete: _refreshPasscodeStatus,
           );
@@ -134,12 +187,17 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
         /// 2B. Passcode configured but app is locked -> Show dedicated AppLockScreen
         if (!_appLockService.isAppUnlocked) {
           return AppLockScreen(
-            key: const ValueKey('app_lock_screen'),
+            key: const ValueKey('gate_app_lock_screen'),
             appLockService: _appLockService,
-            onUnlocked: () => setState(() {}),
+            onUnlocked: () {
+              if (mounted) setState(() {});
+            },
             onSignOutRequested: () async {
               _chatRepository.stopRelayListener();
               _appLockService.lockApp();
+              if (mounted && Navigator.of(context).canPop()) {
+                Navigator.of(context).popUntil((route) => route.isFirst);
+              }
               await _authRepository.signOut();
             },
           );
@@ -147,6 +205,7 @@ class _AuthGateState extends State<AuthGate> with WidgetsBindingObserver {
 
         /// 2C. Unlocked and authenticated -> Show primary HomeScreen (Inbox)
         return HomeScreen(
+          key: ValueKey('gate_home_screen_${user.id}'),
           currentUser: user,
           authRepository: _authRepository,
           chatRepository: _chatRepository,
